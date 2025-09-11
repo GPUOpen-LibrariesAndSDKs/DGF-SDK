@@ -110,6 +110,7 @@ namespace DGF
         uint8_t numOMMDescriptors; 
         uint8_t numOMMHotPatchDwords;
         uint8_t haveUserData;
+        uint8_t reuseBufferIndexSize;
     };
 
     void DecodeMetaData(MetaData* meta, const uint8_t* block);
@@ -128,6 +129,9 @@ namespace DGF
     //   returns number of vertices
     size_t DecodeTopology( TriControlValues* control, uint8_t* indices, const uint8_t* block );
 
+    // Decode the number of indices stored in a block.
+    size_t DecodeStoredIndicesCount(const uint8_t* block);
+
     // Decodes per-triangle OMM descriptor indices
     void DecodeTriangleOMMIndices(uint8_t* pOMMIndices, const uint8_t* block);
 
@@ -145,6 +149,7 @@ namespace DGF
 
     // Convert a range of fixed-point vertices to floating-point
     void ConvertOffsetsToFloat(size_t numVerts, FloatVert* pVerts, const OffsetVert* pOffsets, const MetaData& meta);
+    void ConvertOffsetsToFloat(size_t numVerts, FloatVert* pVerts, const OffsetVert* pOffsets, int32_t anchor[3], uint8_t exponent);
 
     // Compute the size of an encoded mesh topology
     void ComputeTopologySizes( size_t* pIsFirstBitSize, 
@@ -162,6 +167,12 @@ namespace DGF
 
     // Inserts user-defined data into a previously encoded block
     void WriteUserData( uint8_t* block, const void* userData, size_t offsetToWrite, size_t sizeToWrite );
+
+    // Converts a triangle list into an equivalent DGF strip by pattern matching, inserting restarts as needed
+    void PatternMatchStrip(TriControlValues* ctrl, uint8_t* indices, const uint8_t* triList, size_t numTris );
+
+    // Adjust bit widths to match DGF encoding requirements
+    size_t AdjustVertexWidths(uint8_t bpvOut[3], const uint8_t bpvIn[3]);
 
     struct EncoderInput
     {
@@ -232,4 +243,3 @@ namespace DGF
 #else
     #define DGF_ASSERT(x) 
 #endif
-

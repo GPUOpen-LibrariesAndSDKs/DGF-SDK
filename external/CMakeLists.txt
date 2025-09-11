@@ -20,11 +20,36 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-add_subdirectory(d3d)
 add_subdirectory(miniply)
 add_subdirectory(tinyobjloader)
-add_subdirectory(imgui)
 
-set_target_properties(agilitySDK PROPERTIES FOLDER "external")
+if ( DGF_BUILD_SAMPLES )
+    add_subdirectory(d3d)
+    add_subdirectory(imgui) # exclude imgui unless building samples
+    
+	set( VULKAN_HEADERS_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Vulkan-Headers" )
+    add_subdirectory(volk)
+    add_subdirectory(vma)
+
+endif()
+
+
 set_target_properties(miniply PROPERTIES FOLDER "external")
-set_target_properties(imgui PROPERTIES FOLDER "external")
+set_target_properties(tinyobj PROPERTIES FOLDER "external")
+
+if ( DGF_BUILD_SAMPLES )
+    set_target_properties(imgui PROPERTIES FOLDER "external")    # exclude imgui unless building samples
+    set_target_properties(imgui PROPERTIES EXCLUDE_FROM_ALL 1)
+
+    set_target_properties(volk PROPERTIES FOLDER "external"	)
+    set_target_properties(vma PROPERTIES FOLDER "external")
+	set_target_properties(agilitySDK PROPERTIES FOLDER "external")
+
+    set_target_properties(volk PROPERTIES EXCLUDE_FROM_ALL 1)
+    set_target_properties(vma PROPERTIES EXCLUDE_FROM_ALL 1)
+    set_target_properties(agilitySDK PROPERTIES EXCLUDE_FROM_ALL 1)
+
+endif()
+
+set_target_properties(miniply PROPERTIES EXCLUDE_FROM_ALL 1)
+set_target_properties(tinyobj PROPERTIES EXCLUDE_FROM_ALL 1)

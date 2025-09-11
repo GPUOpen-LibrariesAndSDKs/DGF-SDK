@@ -31,7 +31,7 @@
 #define GRAPH_ASSERT(x)
 //#define GRAPH_ASSERT(x) DGF_ASSERT(x)
 
-namespace DGF
+namespace DGFBaker
 {
 
     class ClusterAdjacencyGraph

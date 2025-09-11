@@ -24,7 +24,7 @@
 #include "Quantization.h"
 #include "SIMD.h"
 
-namespace DGF
+namespace DGFBaker
 {
     int32_t Quantize(float value, int8_t exponent)
     {
@@ -40,8 +40,6 @@ namespace DGF
 
     void QuantizeVerts(const std::span<float3> verticesOut, int8_t exponent)
     {
-        // NOTE:  Not using helper classes here, because a scalar loop
-        //   is easier for compiler auto-vectorization to get right
         float* pFloat = (float*)verticesOut.data();
         static_assert(sizeof(float3) == 3 * sizeof(float), "oops");
 
@@ -51,15 +49,15 @@ namespace DGF
         }
     }
 
-    void QuantizeVerts(const std::span<int3> verticesOut, const std::span<const float3> verticesIn, int8_t Exp)
+    void QuantizeVerts(const std::span<int3> verticesOut, const float3* verticesIn, int8_t Exp)
     {
-        float* pFloat = (float*)verticesIn.data();
+        float* pFloat = (float*)verticesIn;
         int32_t* pInt = (int32_t*)verticesOut.data();
-        static_assert(sizeof(float3) == 3 * sizeof(float), "oops");
+        static_assert(sizeof(float3) == 3 * sizeof(float), "oops"); // this code assumes tightly packed vecotrs
         static_assert(sizeof(int3) == 3 * sizeof(int32_t), "oops");
 
         float scale = ldexpf(1.0f, -Exp);
-        size_t n = 3 * verticesIn.size();
+        size_t n = 3 * verticesOut.size();
         size_t n4 = 4 * (n / 4);
         
         SIMDVecf vscale(scale);
@@ -88,50 +86,99 @@ namespace DGF
             pFloat[i] = ((float)pInt[i]) * scale;        
     }
 
-    ExponentInfo ChooseQuantizationExponent(const std::span<Cluster> clusters, size_t targetBits)
+    int8_t ChooseQuantizationExponent( const ClusteredMesh& mesh, const Config& config )
     {
         // find object-level AABB, and 
         //  length of largest AABB edge of any cluster
-        double maxClusterEdge = 0;
+        double3 maxClusterSize = double3(0,0,0);
+        size_t numClusters = mesh.GetNumClusters();
         AABB objectBox;
-        for (Cluster& cluster : clusters)
+        for (size_t i = 0; i < numClusters; i++)
         {
+            float3 verts[DGFBaker::MAX_CLUSTER_VERTICES];
+            size_t numVerts = mesh.ReadClusterVertices(i, (float*)verts, DGFBaker::MAX_CLUSTER_VERTICES);
+
             AABB box;
-            for( float3& vert : cluster.Vertices )
-                box.Expand(vert);
+            for (size_t i = 0; i < numVerts; i++)
+                box.Expand(verts[i]);
 
-            float clusterEdge = box.LongEdgeLength();
-            if( maxClusterEdge < clusterEdge )
-                maxClusterEdge = clusterEdge;
+            double3 diag = double3(
+                box.Max.x - box.Min.x, 
+                box.Max.y - box.Min.y, 
+                box.Max.z - box.Min.z);
 
-            objectBox.Expand(box);
+            if (config.quantizeForAnimation)
+            {
+                // for animation, bound the offsets based on the bounding box diagonal
+                //   to allow for rotation, and apply a fudge factor for deformation
+                double diagLen  = std::sqrt(diag.x * diag.x + diag.y * diag.y + diag.z * diag.z);                
+                diagLen *= config.clusterDeformationPadding;
+
+                double maxSize  = std::max(diagLen, maxClusterSize.x);
+                maxClusterSize = double3(maxSize, maxSize, maxSize);
+            }
+            else
+            {
+                // for static geometry:  bound the offsets based on the x,y,z extents
+                maxClusterSize = max(diag, maxClusterSize);
+            }
+
+            objectBox.Expand(box);            
         }
 
+        // combine the provided animation extents with the object level bounding box
+        //  This ensures that the exponent clamping will prevent anchor overflow for any animated position
+        if (config.quantizeForAnimation)
+        {
+            DGFBaker::AnimationExtents extents = mesh.GetAnimationExtents();
+            if (extents.Valid())
+            {
+                AABB extentsAABB(
+                    float3(extents.Min[0], extents.Min[1], extents.Min[2]),
+                    float3(extents.Max[0], extents.Max[1], extents.Max[2]));
+                objectBox.Expand(extentsAABB);
+            }
+        }
+
+        // determine the assigned bit widths for each axis.
+        //  if assigned bit-width is zero, quantize based on the maximum bit width
+        //   in this case the encoder chooses the bit width
+        size_t xbits = config.blockForcedOffsetWidth[0];
+        size_t ybits = config.blockForcedOffsetWidth[1];
+        size_t zbits = config.blockForcedOffsetWidth[2];
+        xbits = xbits ? xbits : DGF::MAX_VERTEX_COMPONENT_BITS;
+        ybits = ybits ? ybits : DGF::MAX_VERTEX_COMPONENT_BITS;
+        zbits = zbits ? zbits : DGF::MAX_VERTEX_COMPONENT_BITS;
+
         // compute the minimum exponent which prevents offset overflow
-        //   We use the length of the cluster box to avoid having to place anchors at specific places in order to have enough range
-        int8_t minExp = (int8_t) std::ceil( std::log2(maxClusterEdge) - 16 );
+        int8_t minExpX = (int8_t)std::ceil( std::log2((double)maxClusterSize.x) - xbits );
+        int8_t minExpY = (int8_t)std::ceil( std::log2((double)maxClusterSize.y) - ybits );
+        int8_t minExpZ = (int8_t)std::ceil( std::log2((double)maxClusterSize.z) - zbits );
+        int8_t minExp = std::max(minExpX, std::max(minExpY, minExpZ));
 
         // Adjust the minimum exponent to avoid anchor overflow
-        double minCoord = std::min( objectBox.Min.x, std::min( objectBox.Min.y, objectBox.Min.z));
-        double maxCoord = std::max( objectBox.Max.x, std::max( objectBox.Max.y, objectBox.Max.z));
+        double minCoord = std::min(objectBox.Min.x, std::min(objectBox.Min.y, objectBox.Min.z));
+        double maxCoord = std::max(objectBox.Max.x, std::max(objectBox.Max.y, objectBox.Max.z));
         double Amin = S24_MIN;
         double Amax = S24_MAX;
         if (minCoord < 0)
         {
-            minExp = std::max( minExp, (int8_t)std::ceil( std::log2( minCoord / S24_MIN ) ) );
+            minExp = std::max(minExp, (int8_t)std::ceil(std::log2(minCoord / S24_MIN)));
         }
         if (maxCoord > 0)
         {
-            minExp = std::max( minExp, (int8_t)std::ceil( std::log2( maxCoord / S24_MAX ) ) );
+            minExp = std::max(minExp, (int8_t)std::ceil(std::log2(maxCoord / S24_MAX)));
         }
 
-        // choose initial exponent based on object AABB length
+        // choose target exponent based on object AABB length
         double objectEdge = objectBox.LongEdgeLength();
-        double imax = (1<<(targetBits-1))-1;
-        int8_t targetExp = (int8_t) std::ceil( std::log2(objectEdge/imax) );
+        double imax = (1 << (config.targetBitWidth - 1)) - 1;
+        int8_t targetExp = (int8_t)std::ceil(std::log2(objectEdge / imax));
 
-        return { minExp, targetExp };
+        // clamp the target exponent to the minimum exponent
+        return std::max(minExp, targetExp);
     }
+
 
     int3 QuantizeVert( float3 v, int8_t exp )
     {

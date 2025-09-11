@@ -28,7 +28,7 @@
 
 #include "Utils.h"
 
-namespace DGF
+namespace DGFBaker
 {
     class SIMDVeci;
 

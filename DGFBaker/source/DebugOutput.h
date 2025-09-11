@@ -28,9 +28,5 @@
 namespace DGFBaker
 {
     struct Config;
-}
-
-namespace DGF
-{
     void PrintPerfData( std::ostream& str, PerformanceData& perf, const DGFBaker::Config& config );
 }

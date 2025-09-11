@@ -29,11 +29,11 @@
 
 #include "AdjacencyGraph.h"
 
-namespace DGF
+namespace DGFBaker
 {
-    struct TriangleRemap
+    struct LocalTriangleRemap
     {
-        bool operator==(const TriangleRemap& remap) const
+        bool operator==(const LocalTriangleRemap& remap) const
         {
             if (InputPrimID != remap.InputPrimID)
                 return false;
@@ -137,9 +137,9 @@ namespace DGF
 }
 
 
-namespace DGF
+namespace DGFBaker
 {
     constexpr bool ENABLE_BACKTRACK = true;
 
-    void GenerateStrips(DGFStripInfo& strips, BlockAdjacencyGraph& graph, TriangleRemap* remapOut, const uint8_t* indices, size_t numTris);
+    void GenerateStrips(DGFStripInfo& strips, BlockAdjacencyGraph& graph, LocalTriangleRemap* remapOut, const uint8_t* indices, size_t numTris);
 }

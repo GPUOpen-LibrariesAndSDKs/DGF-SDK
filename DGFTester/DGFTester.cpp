@@ -227,6 +227,7 @@ struct CommandLine
     bool validate = true;
     bool discardMaterials = false;
     bool measureError = false;
+    bool testPreclusterPath = false;
 };
 
 bool ParseCommandLine( CommandLine& cmd, int argc, char** argv)
@@ -239,6 +240,7 @@ bool ParseCommandLine( CommandLine& cmd, int argc, char** argv)
         printf("         --cluster-max-faces <uint> \n");
         printf("         --cluster-max-vertices <uint> \n");
         printf("         --target-bits <uint> \n");
+        printf("         --exponent <int> \n");
         printf("         --print-perf \n");
         printf("         --skip-validation \n");
         printf("         --dump-obj <path>\n");
@@ -249,6 +251,10 @@ bool ParseCommandLine( CommandLine& cmd, int argc, char** argv)
         printf("         --forced-offset-width <uint> <uint> <uint>\n");
         printf("         --user-data\n");
         printf("         --packer {HPG24|SAH}\n");
+        printf("         --weld-vertices\n");
+        printf("         --test-preclustering\n");
+        printf("         --quantize-for-animation\n");
+        printf("         --deformation-padding <float>\n");
         return false;
     }
 
@@ -264,6 +270,7 @@ bool ParseCommandLine( CommandLine& cmd, int argc, char** argv)
     bakerConfig.packer = DGFBaker::PackerMode::DEFAULT;
     bakerConfig.encoderRoundTripValidation = true;
     bakerConfig.generateTriangleRemap = true;
+    bakerConfig.weldVertices = false;
 
     for (int i = 2; i < argc; )
     {
@@ -282,7 +289,14 @@ bool ParseCommandLine( CommandLine& cmd, int argc, char** argv)
         {
             if (i != argc)
                 bakerConfig.targetBitWidth = atoi(argv[i++]);
+            bakerConfig.quantizationMode = DGFBaker::QuantizationMode::TARGET_BIT_WIDTH;
         }   
+        else if (strcmp(optionName, "--exponent") == 0)
+        {
+            if (i != argc)
+                bakerConfig.quantizationExponent = atoi(argv[i++]);
+            bakerConfig.quantizationMode = DGFBaker::QuantizationMode::EXPLICIT_EXPONENT;
+        }
         else if (strcmp(optionName, "--print-perf") == 0)
         {
             bakerConfig.printPerfData = true;
@@ -336,6 +350,26 @@ bool ParseCommandLine( CommandLine& cmd, int argc, char** argv)
                 cmd.bakerConfig.packer = DGFBaker::PackerModeFromString(packerName);
             }
         }
+        else if (strcmp(optionName, "--weld-vertices") == 0)
+        {
+            cmd.bakerConfig.weldVertices = true;
+        }
+        else if (strcmp(optionName, "--test-preclustering") == 0)
+        {
+            cmd.testPreclusterPath = true;
+        }
+        else if (strcmp(optionName, "--quantize-for-animation") == 0)
+        {
+            cmd.bakerConfig.quantizeForAnimation = true;
+        }
+        else if (strcmp(optionName, "--deformation-padding") == 0)
+        {
+            if (i != argc)
+            {
+                float padding = (float) std::atof(argv[i++]);
+                cmd.bakerConfig.clusterDeformationPadding = padding;
+            }
+        }
         else
         {
             printf("Spurious commandline argument: %s\n", optionName);
@@ -385,7 +419,6 @@ bool DumpBIN(const char* fileName, const DGFBaker::BakerOutput& bakerOutput)
     file.close();
     return file.good();
 }
-
 
 const char* GetExtension(const char* file)
 {
@@ -512,6 +545,65 @@ float AnalyzeBlockSAH( const uint8_t* blocks, size_t numBlocks, const Mesh& mesh
 }
 
 
+static void TestPreclusterPath( const DGFBaker::Config& config, DGFBaker::Baker& baker, const DGFBaker::BakerMesh& mesh )
+{
+    printf("**** Testing pre-cluster path ***\n");
+
+    auto startTime = std::chrono::high_resolution_clock::now();
+    std::vector<DGFBaker::BakerMeshCluster> clusters = baker.BuildClusters(mesh);
+    DGFBaker::ClusteredBakerMesh clusteredMesh = DGFBaker::ClusteredBakerMesh(mesh,clusters);
+    DGFBaker::BakerOutputPreclustered output = baker.BakeDGFPreclustered(clusteredMesh);
+    
+    auto endTime = std::chrono::high_resolution_clock::now();
+    double executionTime = std::chrono::duration<double>(endTime - startTime).count();
+    
+    size_t numBlocks = 0;
+    for (size_t i = 0; i < output.clusters.size(); i++)
+        numBlocks += output.clusters[i].dgfBlocks.size() / DGF::BLOCK_SIZE;
+    
+    printf("Conversion took: %.2fms  Produced %zu blocks\n", executionTime * 1000, numBlocks );
+
+    printf("Validating...\n");
+    DGFBaker::Validator val(std::cout, config.weldVertices);
+    if (!val.ValidateDGFPreclustered(clusteredMesh, output))
+    {
+        exit(1);
+    }
+    printf("ok\n");
+}
+
+void PrintClusterSizeStatistics( const DGFBaker::BakerOutput& output )
+{
+    size_t numClusters = output.clusterTable.size();
+    size_t numBlocks = output.dgfBlocks.size() / DGF::BLOCK_SIZE;
+
+    size_t minBlocks = numBlocks;
+    size_t maxBlocks = 0;
+    size_t minTris = DGFBaker::MAX_CLUSTER_FACES;
+    size_t maxTris = 0;
+    size_t totalTris = 0;
+    for (size_t cluster = 0; cluster < numClusters; cluster++)
+    {
+        size_t blockStart = output.clusterTable[cluster];
+        size_t blockEnd = (cluster < numClusters - 1) ?  output.clusterTable[cluster + 1] : numBlocks;
+
+        size_t n = blockEnd - blockStart;
+        minBlocks = std::min(n, minBlocks);
+        maxBlocks = std::max(n, maxBlocks);
+
+        size_t numTris = 0;
+        for (size_t b = blockStart; b < blockEnd; b++)
+            numTris += DGF::DecodeTriangleCount(output.dgfBlocks.data() + DGF::BLOCK_SIZE * b);
+        minTris = std::min(numTris, minTris);
+        maxTris = std::max(numTris, maxTris);
+        totalTris += numTris;
+    }
+
+    printf("Blocks per cluster:  Min: %zu  Max: %3zu Mean: %.2f\n", minBlocks, maxBlocks, (double)numBlocks / (double)numClusters);
+    printf("Tris per cluster:    Min: %zu  Max: %3zu Mean: %.2f\n", minTris, maxTris, (double)totalTris / (double)numClusters);
+}
+
+
 int main(int argc, char* argv[])
 {    
     CommandLine cmdLine;
@@ -526,8 +618,17 @@ int main(int argc, char* argv[])
     printf("DGFBaker configuration: \n");
     printf("    Cluster face limit: %zu\n", bakerConfig.clusterMaxFaces);
     printf("    Cluster vert limit: %zu\n", bakerConfig.clusterMaxVerts);
-    printf("    Bit width         : %zu\n", bakerConfig.targetBitWidth);    
+    if (bakerConfig.quantizationMode == DGFBaker::QuantizationMode::TARGET_BIT_WIDTH)
+        printf("    Bit width         : %zu\n", bakerConfig.targetBitWidth);
+    else
+        printf("    Explicit exponent : %d\n", bakerConfig.quantizationExponent);
+
     printf("    Packer            : %s\n",  DGFBaker::PackerModeToString(bakerConfig.packer));
+    if (bakerConfig.quantizeForAnimation)
+    {
+        printf("    Animation mode\n");
+        printf("    Deformation padding: %.4f\n", bakerConfig.clusterDeformationPadding);
+    }
 
     // load the input
     const char* Extension = GetExtension(inFile);
@@ -571,6 +672,7 @@ int main(int argc, char* argv[])
     DGFBaker::BakerOutput dgfOutput = baker.BakeDGF(bakerMesh);
     auto endTime = std::chrono::high_resolution_clock::now();
     double executionTime = std::chrono::duration<double>(endTime - startTime).count();
+    printf("Conversion took: %.2fms\n", executionTime * 1000);
 
     // print the size
     size_t blockByteSize = dgfOutput.dgfBlocks.size();
@@ -584,18 +686,20 @@ int main(int argc, char* argv[])
     printf("%.4f B/tri  (%.2f:1)\n", dgfBytesPerTri, inputByteSize / (double)blockByteSize);
     printf("%zu block vertices, %zu block triangles (%.2f V/Tri)\n", numBlockVerts, numBlockTris, (double)numBlockVerts/(double)numBlockTris);
     printf("%.2f Tris/Block\n", numBlockTris / (double)numBlocks);
-    printf("%.2f Verts/Block\n", numVerts / (double)numBlocks);
+    printf("%.2f Verts/Block\n", numBlockVerts / (double)numBlocks);
     printf("Vertex duplication factor: %.2f\n", (double)numBlockVerts / (double)numVerts);
     printf("Vertex duplication cost per byte: %.2fB/Tri\n", (numBlockVerts - numVerts)/(double)numTriangles );
 
     float sah = AnalyzeBlockSAH(dgfOutput.dgfBlocks.data(), numBlocks, mesh);
     printf("SAH is: %f\n", sah);
 
+    PrintClusterSizeStatistics(dgfOutput);
+
     // check it
     if (cmdLine.validate)
     {
         printf("Validating DGF blocks...\n");
-        DGFBaker::Validator val(std::cout);
+        DGFBaker::Validator val(std::cout,cmdLine.bakerConfig.weldVertices);
         if (!val.ValidateDGF(bakerMesh, dgfOutput))
         {
             return 1;
@@ -634,6 +738,11 @@ int main(int argc, char* argv[])
     {
         error = AnalyzeError(dgfOutput, mesh);
         printf("Max Error: %f  Average Error: %f\n",error.max, error.average );
+    }
+
+    if (cmdLine.testPreclusterPath)
+    {
+        TestPreclusterPath(bakerConfig,baker, bakerMesh);
     }
 
     if (cmdLine.statsFile)

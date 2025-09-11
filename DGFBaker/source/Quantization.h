@@ -27,22 +27,17 @@
 #include "Cluster.h"
 #include <span>
 
-namespace DGF
+namespace DGFBaker
 {
 
     int32_t Quantize(float value, int8_t exponent);
     float DeQuantize(int32_t value, int8_t exponent);
     void QuantizeVerts(const std::span<float3> vertices, int8_t exponent);
-    void QuantizeVerts(const std::span<int3> verticesOut, const std::span<const float3> vertices, int8_t exponent);
+    void QuantizeVerts(const std::span<int3> verticesOut, const float3* vertices, int8_t exponent);
     void DeQuantizeVerts(const std::span<float3> verticesOut, const std::span<const int3> quantizedVertices, int8_t exponent);
 
-    struct ExponentInfo
-    {
-        int8_t minExp;
-        int8_t targetExp;
-    };
 
-    ExponentInfo ChooseQuantizationExponent( const std::span<Cluster> clusters, size_t targetBits );
+    int8_t ChooseQuantizationExponent(const DGFBaker::ClusteredMesh& mesh, const DGFBaker::Config& config);
 
     
     int3 QuantizeVert(float3 v, int8_t exp);

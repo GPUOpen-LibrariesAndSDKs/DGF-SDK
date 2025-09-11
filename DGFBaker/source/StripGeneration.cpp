@@ -27,7 +27,7 @@
 //#define STRIP_BUILD_TRACE(...) printf(__VA_ARGS__)
 #define STRIP_BUILD_TRACE(...)
 
-namespace DGF
+namespace DGFBaker
 {
     struct TmpStrip
     {
@@ -48,12 +48,12 @@ namespace DGF
 
         }
 
-        TmpTri tris[MAX_TRIS];
+        TmpTri tris[DGF::MAX_TRIS];
         size_t numTris = 0;
     };
 
 
-    static void EncodeStrip( DGFStripInfo& strips, TriangleRemap* remapOut, const TmpStrip& tmpStrip )
+    static void EncodeStrip( DGFStripInfo& strips, LocalTriangleRemap* remapOut, const TmpStrip& tmpStrip )
     {
         size_t numTris = tmpStrip.numTris; 
         strips.numTriangles = tmpStrip.numTris;
@@ -117,7 +117,7 @@ namespace DGF
         strips.numIndices = 0;
         for (size_t i = 0; i < numTris; i++)
         {
-            if (strips.triControl[i] == TriControlValues::TC_RESTART)
+            if (strips.triControl[i] == DGF::TriControlValues::TC_RESTART)
             {
                 auto idx0 = tmpStrip.tris[i].rotatedIndices[0];
                 auto idx1 = tmpStrip.tris[i].rotatedIndices[1];
@@ -141,7 +141,7 @@ namespace DGF
 
 
 
-    void GenerateStrips(DGFStripInfo& strips, BlockAdjacencyGraph& graph,  TriangleRemap* remapOut, const uint8_t* indices, size_t numTris )
+    void GenerateStrips(DGFStripInfo& strips, BlockAdjacencyGraph& graph, LocalTriangleRemap* remapOut, const uint8_t* indices, size_t numTris )
     {
         TmpStrip tmpStrip;
 

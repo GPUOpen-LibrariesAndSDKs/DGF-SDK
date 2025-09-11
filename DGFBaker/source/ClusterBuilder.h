@@ -26,14 +26,15 @@
 #include "Cluster.h"
 #include "DGFBaker.h"
 
-namespace DGF
+namespace DGFBaker
 {    
     
     void BuildClustersBinSAH(
         const DGFBaker::BakerMesh& mesh,
         std::vector<Cluster>& clusters,
         size_t maxVerts,
-        size_t maxFaces);
+        size_t maxFaces,
+        bool weldVertices );
 
     bool ValidateClusters(const std::vector<Cluster>& clusters, const DGFBaker::BakerMesh& mesh, size_t maxVerts, size_t maxFaces );
 }

@@ -24,23 +24,28 @@
 // clang-format off
 
 #include "Utils.h"
-#include "StripGeneration.h" // for 'TriangleRemap'
+#include "StripGeneration.h" 
 #include "DGFBaker.h"
 
-namespace DGF
+namespace DGFBaker
 {
-    struct Cluster
-    {     
-        std::vector<float3> Vertices;
-        std::vector<uint8_t> Indices;
-        std::vector<uint32_t> PrimIDs;
-        
-        std::vector<DGFBaker::TriangleAttributes> Attributes;
+    typedef BakerMeshCluster Cluster;
 
-        std::vector<uint8_t> dgfBlocks;
-        std::vector<TriangleRemap> localRemap;
-        std::vector<int32_t> outputOMMIndices;
+    struct PackClusterInputs
+    {
+        size_t numVerts;
+        size_t numTris;
+        const float3* Verts;
+        const uint8_t* Indices;
+        const DGFBaker::TriangleAttributes* Attributes;
+        int8_t exponent;
     };
 
+    struct PackClusterResult
+    {
+        std::vector<uint8_t> dgfBlocks;
+        std::vector<LocalTriangleRemap> localRemap;
+        std::vector<int32_t> outputOMMIndices;
+    };
 
 }

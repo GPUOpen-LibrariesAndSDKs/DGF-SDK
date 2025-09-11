@@ -31,7 +31,7 @@
 
 #include "DGFBaker.h"
 
-namespace DGF
+namespace DGFBaker
 {
 
 struct alignas(16) PrimRef
@@ -60,7 +60,56 @@ static void SortIndices( uint64_t* indices, size_t numIndices, size_t maxVertexI
     );
 }
 
-static Cluster BuildCluster(PrimRef* primRefs, size_t numTris, const DGFBaker::BakerMesh& mesh)
+static void WeldVertices(Cluster& cluster, const uint16_t* tmpIndices, const DGFBaker::BakerMesh& mesh )
+{
+    // sort and de-duplicate vertices by position
+    struct TmpVert
+    {
+        float3 v;
+        uint32_t oldIndexInCluster;
+        uint32_t indexInMesh;
+        inline bool operator<(const TmpVert& rhs) const { return v < rhs.v;}
+    };
+
+    TmpVert tmpVerts[3*DGFBaker::MAX_CLUSTER_FACES];
+    size_t numVerts = cluster.VertexIndices.size();
+    for (size_t i = 0; i < numVerts; i++)
+    {
+        tmpVerts[i].oldIndexInCluster = (uint32_t)i;
+        tmpVerts[i].indexInMesh = cluster.VertexIndices[i];
+        mesh.ReadVertex((float*)&tmpVerts[i].v, tmpVerts[i].indexInMesh);
+    }
+
+    std::sort(&tmpVerts[0], &tmpVerts[numVerts]);
+
+    // map all duplicated verts onto the same original vert
+    std::array<uint8_t, DGFBaker::MAX_CLUSTER_VERTICES> indexRemap;
+    size_t n = 0;
+    size_t i = 0;
+    do
+    {
+        // store a new unique vertex
+        size_t newIndex = n;
+        cluster.VertexIndices[n++] = tmpVerts[i].indexInMesh;
+
+        // map all copies of this vertex onto the stored one
+        size_t i0 = i;
+        do
+        {
+            indexRemap[tmpVerts[i++].oldIndexInCluster] = (uint8_t)newIndex;
+        } while (i < numVerts && !(tmpVerts[i0] < tmpVerts[i]));
+        
+    } while (i < numVerts);
+
+    cluster.VertexIndices.resize(n);
+
+    size_t numIndices = cluster.Topology.size();
+    for (size_t i = 0; i < numIndices; i++)
+        cluster.Topology[i] = indexRemap[tmpIndices[i]];
+
+}
+
+static Cluster BuildCluster(PrimRef* primRefs, size_t numTris, const DGFBaker::BakerMesh& mesh, bool weldVerts)
 {
     DGF_ASSERT(numTris <= DGFBaker::MAX_CLUSTER_FACES);
 
@@ -69,7 +118,7 @@ static Cluster BuildCluster(PrimRef* primRefs, size_t numTris, const DGFBaker::B
     // copy prim IDs
     Cluster outputCluster;
     outputCluster.PrimIDs.resize(numTris);
-    outputCluster.Indices.resize(3 * numTris);
+    outputCluster.Topology.resize(3 * numTris);
     for (size_t i = 0; i < numTris; i++)
         outputCluster.PrimIDs[i] = primRefs[i].triangleIndex;
     
@@ -92,29 +141,60 @@ static Cluster BuildCluster(PrimRef* primRefs, size_t numTris, const DGFBaker::B
     // sort vertices to find unique ones
     SortIndices(vertexKeys, 3 * numTris, maxIndex);
 
-    // build the local vertex and index buffer 
-    size_t numIndices = 3 * numTris;
-    for (size_t v = 0; v < numIndices; )
+    if (weldVerts)
     {
-        // copy the next unique vertex
-        size_t v0 = v;
-        size_t oldIndex = vertexKeys[v0] >> 32;
-        size_t newIndex = outputCluster.Vertices.size();
-        
-        float3 vert;
-        mesh.ReadVertex(&vert.x, (uint32_t) oldIndex);
-        outputCluster.Vertices.push_back(vert);
+        // build the vertex buffer, and a temporary index buffer for welding
+        size_t numIndices = 3 * numTris;
+        uint16_t tmpIndices[3 * DGFBaker::MAX_CLUSTER_FACES];
 
-        do
+        for (size_t v = 0; v < numIndices; )
         {
-            // scan run of references to this vertex and populate corresponding index buffer positions
-            size_t vk = vertexKeys[v] & 0xffff;
-            size_t i = (vk >> 8);
-            size_t j = (vk & 3);
-            outputCluster.Indices[3 * i + j] = (uint8_t)newIndex;
-            v++;
+            // copy the next unique vertex
+            size_t v0 = v;
+            size_t oldIndex = vertexKeys[v0] >> 32;
+            size_t newIndex = outputCluster.VertexIndices.size();
 
-        } while (v < numIndices && (vertexKeys[v] >> 32) == oldIndex);
+            outputCluster.VertexIndices.push_back((uint32_t)oldIndex);
+
+            do
+            {
+                // scan run of references to this vertex and populate corresponding index buffer positions
+                size_t vk = vertexKeys[v] & 0xffff;
+                size_t i = (vk >> 8);
+                size_t j = (vk & 3);
+                tmpIndices[3 * i + j] = (uint16_t)newIndex;
+                v++;
+
+            } while (v < numIndices && (vertexKeys[v] >> 32) == oldIndex);
+        }
+
+        // combine verts with unique positions
+        WeldVertices(outputCluster, tmpIndices, mesh);
+    }
+    else
+    {
+        // build the local vertex and index buffer 
+        size_t numIndices = 3 * numTris;
+        for (size_t v = 0; v < numIndices; )
+        {
+            // copy the next unique vertex
+            size_t v0 = v;
+            size_t oldIndex = vertexKeys[v0] >> 32;
+            size_t newIndex = outputCluster.VertexIndices.size();
+
+            outputCluster.VertexIndices.push_back((uint32_t)oldIndex);
+
+            do
+            {
+                // scan run of references to this vertex and populate corresponding index buffer positions
+                size_t vk = vertexKeys[v] & 0xffff;
+                size_t i = (vk >> 8);
+                size_t j = (vk & 3);
+                outputCluster.Topology[3 * i + j] = (uint8_t)newIndex;
+                v++;
+
+            } while (v < numIndices && (vertexKeys[v] >> 32) == oldIndex);
+        }
     }
 
     return std::move(outputCluster);
@@ -129,15 +209,15 @@ static void PostProcessCluster( std::vector<Cluster>& clusters, Cluster& cluster
     else
     {
         DGFBaker::TriangleAttributes attribs[DGFBaker::MAX_CLUSTER_FACES];
-        size_t numTris = cluster.Indices.size() / 3;
+        size_t numTris = cluster.Topology.size() / 3;
         mesh.ReadAttributes(attribs, cluster.PrimIDs.data(), cluster.PrimIDs.size());
 
         bool haveOMM = false;
         bool haveNonOMM = false;
         for (size_t i = 0; i < numTris; i++)
         {
-            haveOMM = attribs[i].hasOMM && haveOMM;
-            haveNonOMM = !attribs[i].hasOMM && haveNonOMM;
+            haveOMM    = haveOMM    ||  attribs[i].hasOMM;
+            haveNonOMM = haveNonOMM || !attribs[i].hasOMM;
             if (haveOMM && haveNonOMM)
                 break;
         }
@@ -159,33 +239,31 @@ static void PostProcessCluster( std::vector<Cluster>& clusters, Cluster& cluster
                 {
                     for (size_t j = 0; j < 3; j++)
                     {
-                        uint8_t idx = cluster.Indices[3 * i + j];
+                        uint8_t idx = cluster.Topology[3 * i + j];
                         if (!OMMVerts.test(idx))
                         {
                             ommVertIndex[idx] = numOMMVerts++;
                             OMMVerts.set(idx);
-                            ommCluster.Vertices.push_back(cluster.Vertices[idx]);
+                            ommCluster.VertexIndices.push_back(cluster.VertexIndices[idx]);
                         }
-                        ommCluster.Indices.push_back(ommVertIndex[idx]);
+                        ommCluster.Topology.push_back(ommVertIndex[idx]);
                     }
                     ommCluster.PrimIDs.push_back(cluster.PrimIDs[i]);
-                    ommCluster.Attributes.push_back(attribs[i]);
                 }
                 else
                 {
                     for (size_t j = 0; j < 3; j++)
                     {
-                        uint8_t idx = cluster.Indices[3 * i + j];
+                        uint8_t idx = cluster.Topology[3 * i + j];
                         if (!nonOMMVerts.test(idx))
                         {
                             nonOMMVertIndex[idx] = numNonOMMVerts++;
                             nonOMMVerts.set(idx);
-                            nonOMMCluster.Vertices.push_back(cluster.Vertices[idx]);
+                            nonOMMCluster.VertexIndices.push_back(cluster.VertexIndices[idx]);
                         }
-                        nonOMMCluster.Indices.push_back(nonOMMVertIndex[idx]);
+                        nonOMMCluster.Topology.push_back(nonOMMVertIndex[idx]);
                     }
                     nonOMMCluster.PrimIDs.push_back(cluster.PrimIDs[i]);
-                    nonOMMCluster.Attributes.push_back(attribs[i]);
                 }
             }
 
@@ -196,14 +274,13 @@ static void PostProcessCluster( std::vector<Cluster>& clusters, Cluster& cluster
         else
         {
             // all triangles have the same 'OMM-ness'
-            cluster.Attributes.insert(cluster.Attributes.end(), &attribs[0], &attribs[numTris]);
             clusters.push_back(std::move(cluster));
         }
     }
 }
 
 
-void BuildClustersBinSAH(const DGFBaker::BakerMesh& mesh, std::vector<Cluster>& clusters, size_t maxVerts, size_t maxFaces)
+void BuildClustersBinSAH(const DGFBaker::BakerMesh& mesh, std::vector<Cluster>& clusters, size_t maxVerts, size_t maxFaces, bool weldVerts)
 {
     constexpr size_t NUM_BINS = 256;
     size_t numTris = mesh.GetTriangleCount();
@@ -220,7 +297,7 @@ void BuildClustersBinSAH(const DGFBaker::BakerMesh& mesh, std::vector<Cluster>& 
         uint32_t idx[3];
         mesh.ReadIndices(idx, (uint32_t) i);
 
-        // filter degenerates
+        // filter index-degenerates
         uint32_t a = idx[0];
         uint32_t b = idx[1];
         uint32_t c = idx[2];
@@ -230,18 +307,26 @@ void BuildClustersBinSAH(const DGFBaker::BakerMesh& mesh, std::vector<Cluster>& 
         float vertices[9];
         mesh.ReadVertices( vertices, idx, 3);
         static_assert(sizeof(float3) == 3 * sizeof(float), "The compiler did something unexpected");
-
         float3 v0 = float3(vertices[0], vertices[1], vertices[2]);
         float3 v1 = float3(vertices[3], vertices[4], vertices[5]);
         float3 v2 = float3(vertices[6], vertices[7], vertices[8]);
+
+        // filter position degenerates if vertex welding is requested
+        //   they will turn into index-degenerates
+        if (weldVerts && ((v0 ==v1) || (v1==v2) || (v2 == v0)) )
+            continue;
+        
         float3 bbmin = min(v0, min(v1, v2));
         float3 bbmax = max(v0, max(v1, v2));
         primRefs.push_back({ bbmin,(uint32_t)i,bbmax,{0},0 });
         centroidBounds.Expand((bbmin + bbmax) * 0.5f);
     }
 
-    numTris = primRefs.size();
+    if (primRefs.empty())
+        return;
 
+    numTris = primRefs.size();
+    
     struct Subtree
     {
         AABB centroidBounds;
@@ -267,9 +352,9 @@ void BuildClustersBinSAH(const DGFBaker::BakerMesh& mesh, std::vector<Cluster>& 
         if (numPrims <= maxFaces)
         {
             // if face count is below the threshold, try to build a cluster
-            Cluster cluster = BuildCluster(&primRefs[tree.startPrim], tree.numPrims, mesh);
-            if (cluster.Vertices.size() <= maxVerts)
-            {
+            Cluster cluster = BuildCluster(&primRefs[tree.startPrim], tree.numPrims, mesh, weldVerts);            
+            if (cluster.VertexIndices.size() <= maxVerts)
+            {                
                 // keep the cluster if it meets the vertex limit
                 //  otherwise, we need to split more
                 PostProcessCluster(clusters, cluster, mesh);
@@ -407,16 +492,13 @@ bool ValidateClusters(const std::vector<Cluster>& clusters, const DGFBaker::Bake
     struct Triangle
     {
         bool operator!=(const Triangle& rhs) const {
-            return v[0] != rhs.v[0] || v[1] != rhs.v[1] || v[2] != rhs.v[2] || ID != rhs.ID ||
-                attribs != rhs.attribs;
+            return v[0] != rhs.v[0] || v[1] != rhs.v[1] || v[2] != rhs.v[2] || ID != rhs.ID;
         };
         bool operator<(const Triangle& rhs) const
         {
             if( ID != rhs.ID )
                 return ID < rhs.ID;
-            if (attribs != rhs.attribs)
-                return attribs < rhs.attribs;
-
+            
             for( size_t i=0; i<3; i++ )
                 if( v[i] != rhs.v[i] )
                     return v[i] < rhs.v[i];
@@ -426,7 +508,6 @@ bool ValidateClusters(const std::vector<Cluster>& clusters, const DGFBaker::Bake
 
         float3 v[3];
         uint32_t ID;
-        DGFBaker::TriangleAttributes attribs;
     };
     size_t numTris = mesh.GetTriangleCount();
     std::vector<Triangle> inputTris;
@@ -454,30 +535,36 @@ bool ValidateClusters(const std::vector<Cluster>& clusters, const DGFBaker::Bake
                     { vertices[3], vertices[4], vertices[5] },
                     { vertices[6], vertices[7], vertices[8] }
                 },
-                (uint32_t)(i) ,
-                attribs
+                (uint32_t)(i) 
             } );
     }
 
     for (const auto& cluster : clusters)
     {
-        if( cluster.Vertices.size() > maxVerts )
+        if( cluster.VertexIndices.size() > maxVerts )
             return false;
-        if (cluster.Indices.size() > maxFaces * 3)
+        if (cluster.Topology.size() > maxFaces * 3)
             return false;
 
-        for (size_t i = 0; i < cluster.Indices.size(); i += 3)
+        for (size_t i = 0; i < cluster.Topology.size(); i += 3)
         {
-            auto attributes = cluster.Attributes.empty() ? DGFBaker::TriangleAttributes() : cluster.Attributes[i / 3];
+            uint32_t triIndices[] = {
+                cluster.VertexIndices[cluster.Topology[i + 0]],
+                cluster.VertexIndices[cluster.Topology[i + 1]],
+                cluster.VertexIndices[cluster.Topology[i + 2]]
+            };
+
+            float vertices[9];
+            mesh.ReadVertices(vertices, triIndices, 3);
+            
             clusterTris.push_back(
                 {
                     {
-                        cluster.Vertices[cluster.Indices[i + 0]],
-                        cluster.Vertices[cluster.Indices[i + 1]],
-                        cluster.Vertices[cluster.Indices[i + 2]]
+                        { vertices[0], vertices[1], vertices[2] },
+                        { vertices[3], vertices[4], vertices[5] },
+                        { vertices[6], vertices[7], vertices[8] }
                     },
-                 cluster.PrimIDs[i/3] ,
-                attributes
+                 cluster.PrimIDs[i/3] 
                 }
             );
         }

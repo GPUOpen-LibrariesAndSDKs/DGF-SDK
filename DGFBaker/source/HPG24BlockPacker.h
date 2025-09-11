@@ -32,13 +32,6 @@
 namespace DGFBaker
 {
     struct Config;
-}
-
-namespace DGF
-{
-
-    static constexpr size_t MAX_UBLAS_VERTS = 256;
-    static constexpr size_t MAX_UBLAS_TRIS  = 256;
 
     struct BlockDesc
     {
@@ -60,7 +53,7 @@ namespace DGF
     };
 
     void BuildBlocks(
-        std::vector<BlockDesc>& blocksOut, std::span<TriangleRemap> remapOut, PerformanceData& perfData,        
+        std::vector<BlockDesc>& blocksOut, std::span<LocalTriangleRemap> remapOut, PerformanceData& perfData,
         std::span<const int3> clusterVertices, int8_t exponent, std::span<const uint8_t> clusterIndices,
         std::span<const uint32_t> clusterMaterialIDs, std::span<const uint8_t> clusterOpaqueFlags,
         size_t triLimit, size_t vertLimit, uint8_t forcedOffsetWidth[3], bool enableUserData
@@ -72,5 +65,6 @@ namespace DGF
         bool userData 
     );
 
-    void PackBlocksHPG24(std::vector<DGF::Cluster>& clusters, PerformanceData& perfData, int8_t exponent, const DGFBaker::Config& config);
+    PackClusterResult PackClusterHPG24(uint32_t primIDBase, const PackClusterInputs& cluster, PerformanceData& perfData, const DGFBaker::Config& config);
+
 }

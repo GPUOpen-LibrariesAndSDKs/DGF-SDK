@@ -25,7 +25,7 @@
 
 #include <array>
 
-namespace DGF
+namespace DGFBaker
 {
     struct CompressedMaterialMetadata
     {

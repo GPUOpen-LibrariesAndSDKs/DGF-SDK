@@ -5,8 +5,8 @@ TARGET_SOURCES(imgui
     include/imgui/imgui.h
     include/imgui/imgui_impl_dx12.h
     include/imgui/imgui_impl_win32.h
+    include/imgui/imgui_impl_vulkan.h
     include/imgui_internal.h
-    include/imgui_stdlib.h
     include/imstb_rectpack.h
     include/imstb_textedit.h
     include/imstb_truetype.h
@@ -16,8 +16,9 @@ TARGET_SOURCES(imgui
     src/imgui_draw.cpp
     src/imgui_impl_dx12.cpp
     src/imgui_impl_win32.cpp
-    src/imgui_stdlib.cpp
+    src/imgui_impl_vulkan.cpp
     src/imgui_tables.cpp
     src/imgui_widgets.cpp
     )
-target_include_directories(imgui PUBLIC include PUBLIC include/imgui)
+target_include_directories(imgui PUBLIC include PUBLIC include/imgui PRIVATE ../Vulkan-Headers/include PRIVATE ../volk)
+target_compile_definitions(imgui PRIVATE IMGUI_IMPL_VULKAN_USE_VOLK)

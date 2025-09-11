@@ -7,8 +7,9 @@ This repository contains our DGF encoding toolchain.  The directory structure is
 * **DGFLib**:  A library containing the low-level encoder/decoder for DGF blocks
 * **DGFBaker**: A library which implements a DGF content baking pipeline
 * **DGFTester**: A command-line test harness
-* **DGFSample**: A simple D3D12 viewer for DGF models, which demonstrates real-time decoding in HLSL shaders. 
-   
+* **DGFSample**: A simple D3D12/Vulkan viewer for DGF models, which demonstrates real-time decoding in HLSL shaders. 
+* **DGFAnimationSample**: A D3D12/Vulkan application demonstrating on the fly DGF block assembly for animated content.
+ 
 # Building the SDK
 
 To build the SDK:
@@ -31,6 +32,11 @@ set( DGF_BUILD_DGFTESTER, 0 )
 set( DGF_BUILD_SAMPLES, 0 )
 add_subdirectory ( ${PATH_TO_DGFSDK} );
 ```
+
+# Running the Real-Time Samples
+
+The Real-Time samples (DGFSample and DGFAnimationSample) should build and run in your IDE out of the box, and support both Vulkan and D3D12.  D3D12 is used by default.  To run the samples under Vulkan, add --vulkan to the command line.
+When run in Vulkan, the samples will leverage the [Vulkan extension](https://gpuopen.com/learn/dense-geometry-format-amd-vulkan-extension/) where available.
 
 ## Using DGFLib
 
@@ -97,7 +103,7 @@ A simple example is shown below:
 // Returns an array of 128B DGF blocks for the input geometry
 std::vector<uint8_t> BakeDGF( const float* vertices, const uint32_t* indices, size_t numVerts, size_t numTris )
 {
-    DGFBaker::BakerConfig config = {};
+    DGFBaker::Config config = {};
     DGFBaker::Baker baker(config);
     
     DGFBaker::BakerMesh mesh(vertices, indices, numVerts, numTris);
@@ -134,7 +140,7 @@ std::vector<uint8_t> StridedMeshExample(
         for( size_t i=0; i<numIndices; i++ )
         {
 	    uint32_t index = vertIndices[i];
-	    memcpy( &output[3*index], vertexData + vertexStride*index, 3*sizeof(float) );
+	    memcpy( &output[3*i], vertexData + vertexStride*index, 3*sizeof(float) );
 	}
     };
     auto _IndexReader = [indices]( uint32_t* output, const uint32_t* triIndices, size_t numTris )
@@ -152,51 +158,195 @@ std::vector<uint8_t> StridedMeshExample(
     return std::move(output.dgfBlocks);
 }
 ```
+### Clustering Without Compression
+
+The first stage of a DGF compression pipeline is to arrange the triangles into SAH-efficient clusters.  The `DGFBaker` class provides a method which allows the cluster builder to be accessed without going all the way to DGF blocks.  The signature is:
+
+```C
+std::vector<BakerMeshCluster> BuildClusters( const BakerMesh& mesh );
+```
+The `BakerMeshCluster` indicates the vertices and triangles from the input mesh which are included in the cluster, and the local connectivity:
+
+```C
+struct BakerMeshCluster
+{
+    std::vector<uint32_t> VertexIndices;  // index of each cluster vert in the input mesh
+    std::vector<uint8_t>  Topology;       // index of each triangle vert in 'VertexIndices' (3 per triangle)
+    std::vector<uint32_t> PrimIDs;        // index of each triangle in the input mesh
+};
+```
+The cluster builder will guarantee that the resulting clusters respect the `BakerConfig::clusterMaxFaces` and `BakerConfig::clusterMaxVertices` fields.  If `BakerConfig::weldVertices` is true, vertices are de-duplicated during cluster formation.  The cluster builder will guarantee that no two vertices in `VertexIndices` have the same position.
+
+### Compressing Pre-Clustered Geometry
+
+The `DGFBaker` class also supports applying DGF compression to pre-clustered input.  This enables DGF compression to be applied to triangle clusters built by other popular clustering tools.  The pre-clustered input path uses a `ClusteredMesh` class which is similar in spirit to the `BakerMesh` class:
+
+```C
+void ClusteredMeshExample( std::vector<MyCluster>& myClusters )
+{
+    DGFBaker::ClusteredMesh mesh(
+       GetVertexReader(myClusters),
+       GetIndexReader(myClusters),
+       GetAttributeReader(myClusters) );
+
+    DGFBaker::BakerOutputPreclustered output = baker.BakeDGFPreclustered(clusteredMesh);
+}
+
+```
+The `DGFBaker::BakerOutputPreclustered` contains separate arrays of DGF blocks and meta-data for each of the input clusters.  
+Like the `BakerMesh`, the `ClusteredMesh` class is built around customizable reader functions:
+
+```C
+// Reads cluster vertices into an array of 3xNumVerts floats.   
+//   Args are:   cluster index, output pointer, max vert count
+//   Returns the number of vertices
+typedef std::function<size_t(size_t, float*, size_t)> ClusterVertexReader;
+
+// Reads cluster connectivity into an array of 3*NumTris indices.   
+//   Args are:   cluster index, output pointer, max triangle count
+//   Returns the number of triangles
+typedef std::function<size_t(size_t, uint8_t*, size_t)> ClusterIndexReader;
+
+// Reads triangle attributes. 
+//  Args are:  cluster index, output ptr, max triangle count
+//  Returns the number of triangles
+typedef std::function<size_t(size_t, DGFBaker::TriangleAttributes*,size_t)> ClusterAttributeReader;
+```
+
+A `DGFBaker::ClusteredBakerMesh` class is also provided to enable routing the output of `DGFBaker::BuildClusters` into `DGFBaker::BakeDGFPreclustered`.   
+
+The following example shows an alternate way to execute a full DGF baking pipeline, which may be more useful if the application wishes to preserve the clustering that the `DGFBaker` produced.
+
+```C
+void PreclusteredMeshExample( DGFBaker::Baker& baker, DGFBaker::BakerMesh& mesh )
+{
+    std::vector<DGFBaker::BakerMeshCluster> clusters = baker.BuildClusters(mesh);
+    DGFBaker::ClusteredBakerMesh clusteredMesh = DGFBaker::ClusteredBakerMesh(mesh,clusters);
+    DGFBaker::BakerOutputPreclustered output = baker.BakeDGFPreclustered(clusteredMesh);
+
+    // use 'output'
+}
+```
+
 
 ### Baker Configuration
 
 The DGFBaker uses a simple configuration structure shown below:
 
 ```C
-  struct Config
-  {
-      size_t clusterMaxFaces = 128;
-      size_t clusterMaxVerts = 256;
-      size_t targetBitWidth = 16;     // target signed bit-width for the fixed-point vertex offsets.  Used to select quantization exponent
-      size_t blockMaxTris  = 64;
-      size_t blockMaxVerts = 64;
-      uint8_t blockForcedOffsetWidth[3] = { 0,0,0 }; // if non-zero, bit-width of x,y,z offsets are forced to these values
-                                                     //    if the vertex data needs more precision, data loss may occur.
-                                                     // If the sum of the widths is not a multiple of 4, x,y,z are incremented until it is
+struct Config
+{
+        size_t clusterMaxFaces = 128;
+        size_t clusterMaxVerts = 256;
+         
+        size_t blockMaxTris  = 64;
+        size_t blockMaxVerts = 64;
+        uint8_t blockForcedOffsetWidth[3] = { 0,0,0 }; 
+        std::ostream* outputStream = nullptr;
+        bool printPerfData = false;                     
+        bool validateClusters = false;                 
+        bool generateVertexTable = false;              
+        bool generateClusterTable = false;             
+        bool generateTriangleRemap = false;            
+        bool enableUserData = false;                   
+        bool encoderRoundTripValidation = false;               
+        PackerMode packer = PackerMode::DEFAULT;
 
-      std::ostream* outputStream = nullptr;
-      bool printPerfData = false;                     
-      bool validateClusters = false;                 // Enable sanity-checks for debugging cluster formation
-      bool generateVertexTable = false;              // Generate the vertex remapping table
-      bool generateClusterTable = false;             // Generate the cluster table
-      bool generateTriangleRemap = false;            // Generate the triangle remapping table
-      bool enableUserData = false;                   // Reserve space for a 32-bit user-data field following the block headers
-      bool encoderRoundTripValidation = false;       // Enable sanity-checks for debugging DGFLib encoder
-      PackerMode packer = PackerMode::DEFAULT;
+        QuantizationMode quantizationMode = QuantizationMode::DEFAULT;
 
-      bool enableExponentAdjust  = true;           // Allow block exponents to vary to improve compression for pre-quantized input
-  };
+        // Used only when QuantizationMode == `TARGET_BIT_WIDTH`
+        size_t targetBitWidth = 16;
+        bool quantizeForAnimation = false;       
+        float clusterDeformationPadding = 1.0f;  
+
+        // Used only when QuantizationMode == `EXPLICIT_EXPONENT`
+        int8_t quantizationExponent = -15; 
+
+        bool enableExponentAdjust  = true;    
+        bool weldVertices = false; 
+};
     
 ```
 
-The algorithms used in DGFBaker are described in the [HPG 2024 Paper](https://gpuopen.com/download/publications/DGF.pdf).  We refer the reader to this paper for additional context.  The most important fields are described below:
+The algorithms used in DGFBaker are described in the [HPG 2024 Paper](https://gpuopen.com/download/publications/DGF.pdf).  We refer the reader to this paper for additional context.  The fields in the `BakerConfig` structure are documented below.
 
-* *targetBitWidth*:  This corresponds to the `b` parameter from the HPG 2024 paper.  It is the target bit width for the per-vertex offsets, and controls the tradeoff between compression rate and vertex accuracy.
-* *packer*:  Selects the block packing algorithm to use.  
-* *enableUserData*: Controls whether to reserve space for a 32-bit user-data field in each block.  Setting this to false improves compression rate.
-* *blockForcedOffsetWidth* : Force a particular width for the block offsets, to allow in-place update for animated blocks.
+|                  |                                                                        |
+|------------------|------------------------------------------------------------------------|
+|  clusterMaxFaces | Maximum number of triangles in a cluster (must be <= 256) |
+|  clusterMaxVerts | Maximum number of vertices in a cluster (must be <= 256) |
+|  blockMaxTris    | Maximum number of triangles allowed in a block |
+|  blockMaxVerts   | Maximum number of vertices allowed in a block |
+| blockForcedOffsetWidth | Can be used to lock the bit width of the per-vertex offsets in the block.  If set to a non-zero value, the corresponding coordinate will be assigned at least that many bits.  Additional bits will be assigned if the sum of all coordinate sizes is not a multiple of four.  This field is intended to support in-place vertex updaters for animated blocks   |
+| outputStream  | An IOStream object to use for diagnostic output |
+| printPerfData | If set, performance profiling information will be printed to `outputStream` | 
+| validateClusters | Enables debug checks on cluster construction |
+| generateVertexTable | If set, the vertex remapping table in the `BakerOutput` will be populated |
+| generateClusterTable | If set, the cluster table in the `BakerOutput` will be populated |
+| generateTriangleRemap | If set, the triangle remapping table in the `BakerOutput` will be populated |
+| enableUserData | Controls whether to reserve space for a 32-bit user-data field in each block.  Setting this to false improves compression rate. |
+| encoderRoundTripValidation | Enables debug checks on the DGF block encoder |
+| packer | Selects the block packing algorithm to use.  The packer modes are listed below. |
+| quantizationMode | Selects the vertex quantization mode to use.  The quantization modes are listed below.|
+| targetBitWidth | This corresponds to the `b` parameter from the HPG 2024 paper.  It is the target bit width for the per-vertex offsets, and controls the tradeoff between compression rate and vertex accuracy.  This field is used only if `QuantizationMode` is `TARGET_BIT_WIDTH` |
+| quantizeForAnimation | Enables animation-aware quantization.  Used only if `QuantizationMode` is `TARGET_BIT_WIDTH`|
+| clusterDeformationPadding | Multiplier to apply to cluster AABB size to account for size change due to deforming animations.  This is a percentage (e.g. 1.05f is 5%). Used only if `QuantizationMode` is `TARGET_BIT_WIDTH` and animation-aware quantization is enabled |
+| quantizationExponent | Fixed exponent to use if `QuantizationMode` is set to `EXPLICIT_EXPONENT` |
+| enableExponentAdjust | Allows the baker to adjust the block exponents to eliminate trailing zero bits.  This can significantly improves the compression rate for pre-quantized input. |
+| weldVertices | Allow the encoder to merge input vertices with identical positions but different indices. When this option is enabled, the block-level connectivity cannot be used as an implicit index buffer. |
 
 The supported packer modes are:
 
 * `DGFBaker::PackerMode::HPG24`:  The algorithm described in the HPG 2024 paper
 * `DGFBaker::PackerMode::SAH`:  An alternate algorithm which performs SAH splits until the resulting triangles fit in a single block.
 
-The `SAH` packer mode is the recommended default.  The `HPG24` algorithm is provided as an alternative, and produces slightly better compression rates, but the resulting blocks have a larger surface area more vertex duplication, which makes them less suitable for ray tracing or fine-grained culling.
+The `SAH` packer mode is the recommended default.  The `HPG24` algorithm is provided as an alternative, and produces slightly better compression rates, but the resulting blocks have a larger surface area and more vertex duplication, which makes them less suitable for ray tracing or fine-grained culling.
+
+The supported quantization modes are:
+
+* `DGFBaker::QuantizationMode::TARGET_BIT_WIDTH`: Chooses a quantization exponent using the algorithm described in the HPG24 paper.  The `BakerConfig::targetBitWidth` field controls the size/quality tradeoff.  This is the preferred method for static geometry.
+* `DGFBaker::QuantizationMode::EXPLICIT_EXPONENT`: The `BakerConfig::quantizationExponent` field is used directly as the vertex quantization factor.  
+
+### Animation-Aware Compression
+
+By default, DGF compression assumes that vertices are static, but this is not strictly required.  In order to support animated vertices, the DGFBaker provides an animation-aware flow.  This is enabled by setting `Config::quantizeForAnimation` to true.  Animation-aware compression can result in reduced accuracy and worse compression rates, and should not be enabled for purely static geometry.
+
+When the animation-aware compression is enabled, a more conservative vertex quantization is used in order to prevent overflow during animation:
+* The quantization factor is selected based on the diagonal of cluster's AABB, to allow for rotation
+* A deformation padding factor is applied to cluster AABB size to allow for size change due to deformation.
+* To prevent anchor overflow for large coordinate values, an optional "animation extent" is used to select the quantization factor to prevent anchor overflow.
+
+Although not strictly required, the `blockForcedOffsetWidth` field will usually be used to reserve a fixed amount of encoding space for animated vertices, and allow for efficient in-place block updates.
+
+The following example demonstrates an animation-aware compression flow:
+
+```C
+DGFBaker::BakerOutput BakeDGF( const float* vertices, const uint32_t* indices, size_t numVerts, size_t numTris )
+{
+    DGFBaker::Config config = {};
+    config.quantizeForAnimation = true;
+    config.clusterDeformationPadding = 1.03f; // pad cluster AABBs by 3%
+    config.blockForcedOffsetWidth[0] = 12;  // assign a fixed precision level for the vertex data
+    config.blockForcedOffsetWidth[1] = 12;
+    config.blockForcedOffsetWidth[2] = 12;
+    config.generateVertexTable = true; // generate a table containing the input index for each DGF block vertex
+    config.enableUserData = true; // allocate a 32b user-data field in each block to hold its vertex table location
+    DGFBaker::Baker baker(config);
+    
+    DGFBaker::BakerMesh mesh(vertices, indices, numVerts, numTris);
+
+    DGFBaker::AnimationExtents extents = {};
+    float extentMin[3] = ...; // compute animation bounding box
+    float extentMax[3] = ...; // (NOT SHOWN)
+    extents.Set(extentMin[0],extentMin[1],extentMin[2],
+                extentMax[0],extentMax[1],extentMax[2]);
+
+    // add the animation extents to the baker mesh
+    mesh.SetAnimationExtents(extents);
+
+    // perform the bake
+    return baker.BakeDGF(mesh);
+}
+```
 
 ### Decoding
 

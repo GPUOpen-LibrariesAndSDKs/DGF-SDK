@@ -26,7 +26,7 @@
 #include "HPG24BlockPacker.h"
 #include "DGFBaker.h"
 
-namespace DGF
+namespace DGFBaker
 {    
     void PrintPerfData( std::ostream& str, PerformanceData& perfData, const DGFBaker::Config& config )
     {

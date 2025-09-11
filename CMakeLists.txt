@@ -22,6 +22,7 @@
 
 cmake_minimum_required(VERSION 3.5)
 project(DGFSDK)
+set_property( GLOBAL PROPERTY USE_FOLDERS ON )
 
 # Check if DGF is used as main project or just consumed as libary with add_subdirectory
 if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -90,5 +91,5 @@ if( DGF_BUILD_DGFTESTER )
     add_subdirectory(DGFTester)
 endif()
 if( DGF_BUILD_SAMPLES )
-	add_subdirectory(DGFSample)
+	add_subdirectory(samples)
 endif()

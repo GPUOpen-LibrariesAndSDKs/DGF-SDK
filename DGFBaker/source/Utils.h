@@ -41,7 +41,7 @@
 
 #include "DGF.h" // DGF_ASSERT
 
-namespace DGF 
+namespace DGFBaker
 {
     constexpr int32_t S24_MAX = 0x7FFFFF;
     constexpr int32_t S24_MIN = ~0x7FFFFF;
@@ -127,10 +127,16 @@ namespace DGF
     typedef vec3<float> float3;
     typedef vec3<int32_t> int3;
     typedef vec3<uint32_t> uint3;
+    typedef vec3<double> double3;
 
     inline int3 operator>>(const int3& lhs, size_t shift)
     {
         return { lhs.x >> shift, lhs.y >> shift, lhs.z >> shift };
+    }
+
+    inline int3 operator<<(const int3& lhs, size_t shift)
+    {
+        return { lhs.x << shift, lhs.y << shift, lhs.z << shift };
     }
 
     // misc. structs

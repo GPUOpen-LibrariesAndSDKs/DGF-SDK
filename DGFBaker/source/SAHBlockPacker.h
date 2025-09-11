@@ -27,9 +27,10 @@
 #include "Cluster.h"
 #include "DGFBaker.h"
 
-namespace DGF
+namespace DGFBaker
 {
 
-    void PackBlocksSAH(std::vector<DGF::Cluster>& clusters, PerformanceData& perfData, int8_t exponent, const DGFBaker::Config& config);
+    PackClusterResult PackClusterSAH(uint32_t primIDBase, const PackClusterInputs& cluster, PerformanceData& perfData, const DGFBaker::Config& config);
+
 
 }

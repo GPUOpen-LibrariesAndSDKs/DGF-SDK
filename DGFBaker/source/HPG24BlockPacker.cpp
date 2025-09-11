@@ -30,14 +30,14 @@
 
 #include "DGFBaker.h"
 
-namespace DGF
+namespace DGFBaker
 {
     struct TmpBlock
     {
-        std::bitset<MAX_UBLAS_VERTS> vertsInBlock;
-        uint8_t vertexClusterToBlock[MAX_UBLAS_VERTS];   // index of each cluster vert in 'blockIndexBuffer' index space
+        std::bitset<DGFBaker::MAX_CLUSTER_VERTICES> vertsInBlock;
+        uint8_t vertexClusterToBlock[DGFBaker::MAX_CLUSTER_VERTICES];   // index of each cluster vert in 'blockIndexBuffer' index space
         uint8_t vertexBlockToCluster[DGF::MAX_VERTS];   // index of each cluster vert in 'blockIndexBuffer' index space
-        uint8_t blockIndexBuffer[3 * MAX_TRIS]; // block-local triangle indices
+        uint8_t blockIndexBuffer[3 * DGF::MAX_TRIS]; // block-local triangle indices
         
         int3 minVertex = int3( INT32_MAX,  INT32_MAX,  INT32_MAX);
         int3 maxVertex = int3(-INT32_MAX, -INT32_MAX, -INT32_MAX);
@@ -50,7 +50,7 @@ namespace DGF
         uint8_t triangleGeomIDIndices[DGF::MAX_TRIS]; // payload index for each block triangle
 
         uint8_t triangleIndices[DGF::MAX_TRIS]; // index of each block tri in the cluster
-        TriangleRemap triangleRemap[DGF::MAX_TRIS];
+        LocalTriangleRemap triangleRemap[DGF::MAX_TRIS];
 
         uint8_t x_bits;
         uint8_t y_bits;
@@ -65,7 +65,7 @@ namespace DGF
     void ExportBlock( BlockDesc& outputBlock, 
                       const TmpBlock& block, 
                       std::span<const int3> clusterVertices, 
-                      TriangleRemap* remapOut, 
+                      LocalTriangleRemap* remapOut,
                       const ClusterAdjacencyGraph& clusterGraph,
                       const uint8_t forcedBlockWidth[3] )
     {        
@@ -298,7 +298,7 @@ namespace DGF
         BlockAdjacencyGraph blockGraph; 
         blockGraph.Build(clusterGraph, block.triangleIndices, numTris);
         DGFStripInfo tmpStrip;
-        DGF::TriangleRemap tmpRemap[DGF::MAX_VERTS];
+        LocalTriangleRemap tmpRemap[DGF::MAX_TRIS];
         GenerateStrips(tmpStrip, blockGraph, tmpRemap, block.blockIndexBuffer, numTris);
 
         // does everything fit?
@@ -326,7 +326,7 @@ namespace DGF
 
     // adds triangles to blocks one by one
     void PackTriangles(std::vector<BlockDesc>& blocksOut,
-        std::span<TriangleRemap> remapOut,
+        std::span<LocalTriangleRemap> remapOut,
         PerformanceData& perfData,
         std::span<const int3>     clusterVertices,
         std::span<const uint8_t>  clusterIndices,
@@ -336,7 +336,7 @@ namespace DGF
         size_t numTris = clusterIndices.size() / 3;
         DGF_ASSERT(numTris > 0);
 
-        std::bitset<MAX_UBLAS_TRIS> usedTris;
+        std::bitset<DGFBaker::MAX_CLUSTER_FACES> usedTris;
         size_t numUsed = 0;
 
         // build cluster adjacency graph
@@ -344,7 +344,7 @@ namespace DGF
         clusterGraph.Build(clusterIndices.data(), numTris);
 
         // build geomID payloads
-        uint32_t clusterGeomIDPayloads[MAX_UBLAS_TRIS];
+        uint32_t clusterGeomIDPayloads[DGFBaker::MAX_CLUSTER_FACES];
         for (size_t i = 0; i < numTris; i++)
         {
             uint32_t geomID = clusterAttributes.empty() ? 0 : clusterAttributes[i].geomID;
@@ -409,7 +409,7 @@ namespace DGF
             }
 
             // finalize the block
-            DGF::Timer t;
+            Timer t;
             
             auto& blockDesc = blocksOut.emplace_back();
             blockDesc.primBase = primOffset;
@@ -420,7 +420,7 @@ namespace DGF
         } while (numUsed < numTris);
     }
 
-    void BuildBlocks(std::vector<BlockDesc>& blocksOut, std::span<TriangleRemap> remapOut, PerformanceData& perfData,
+    void BuildBlocks(std::vector<BlockDesc>& blocksOut, std::span<LocalTriangleRemap> remapOut, PerformanceData& perfData,
                      std::span<const int3> clusterVertices, int8_t exponent, std::span<const uint8_t> clusterIndices,
                      std::span<const DGFBaker::TriangleAttributes> clusterAttributes,
                      size_t triLimit, size_t vertLimit, const uint8_t forcedVertexWidth[3], bool enableUserData )
@@ -511,19 +511,24 @@ namespace DGF
     }
 
 
-    void EncodeBlocks(Cluster& cluster, PerformanceData& perfData, const std::vector<BlockDesc>& blockDescs, bool userData, bool validate )
+    void EncodeBlocks(
+        std::vector<uint8_t>& blocksOut,
+        std::vector<int32_t>& ommIndicesOut,
+        PerformanceData& perfData, 
+        const std::vector<BlockDesc>& blockDescs, 
+        bool userData, bool validate )
     {
         Timer t;
-        cluster.dgfBlocks.resize(blockDescs.size() * DGF::BLOCK_SIZE);
+        blocksOut.resize(blockDescs.size() * DGF::BLOCK_SIZE);
       
         for (size_t i = 0; i < blockDescs.size(); i++)
         {
             const BlockDesc& blockDesc = blockDescs[i];
 
-            EncodeBlock(cluster.dgfBlocks.data() + DGF::BLOCK_SIZE * i, blockDesc, blockDesc.exponent, userData, validate );
+            EncodeBlock(blocksOut.data() + DGF::BLOCK_SIZE * i, blockDesc, blockDesc.exponent, userData, validate );
 
             for (size_t d = 0; d < blockDesc.numOMMDescriptors; d++)
-                cluster.outputOMMIndices.push_back(blockDesc.ommDescriptors[d]);            
+                ommIndicesOut.push_back(blockDesc.ommDescriptors[d]);            
         }
         perfData.EncodeBlocks += t.Tick();
         perfData.NumBlocks += blockDescs.size();
@@ -573,25 +578,26 @@ namespace DGF
         bool operator<(const MortKey& mk) const { return mort < mk.mort; }
     };
 
-    static void MortonSort( DGF::Cluster& cluster )
+    static void MortonSort( const PackClusterInputs& cluster, uint8_t* inputPrimIndices, uint8_t* sortedIndices, DGFBaker::TriangleAttributes* sortedAttribs, const DGFBaker::TriangleAttributes* attribs )
     {
+        size_t numVerts = cluster.numVerts;
         AABB box;
-        for (float3& vert : cluster.Vertices)
-            box.Expand(vert);
+        for( size_t i=0; i<numVerts; i++ )
+            box.Expand(cluster.Verts[i]);
 
         // we use the diagonal length when computing morton codes so that
         //  distances are not distorted if the mesh has a non-square aspect ratio
         float3 diagonal = box.Max - box.Min;
         float diag = std::max(diagonal.x, std::max(diagonal.y, diagonal.z));
 
-        size_t numPrims = cluster.Indices.size() / 3;
+        size_t numPrims = cluster.numTris;
         std::vector<MortKey> mort;
         mort.reserve(numPrims);
         for (size_t triIndex = 0; triIndex < numPrims; triIndex++)
         {
             float3 Centroid(0, 0, 0);
             for (size_t j = 0; j < 3; j++)
-                Centroid = Centroid + cluster.Vertices[cluster.Indices[3 * triIndex + j]];
+                Centroid = Centroid + cluster.Verts[cluster.Indices[3 * triIndex + j]];
 
             float x = Centroid.x / 3;
             float y = Centroid.y / 3;
@@ -611,62 +617,57 @@ namespace DGF
 
         std::sort(mort.begin(), mort.end());
 
-        std::vector<uint32_t> inputPrimIDs = cluster.PrimIDs;
-        std::vector<uint8_t> inputVertexIndices = cluster.Indices;
         for (size_t i = 0; i < numPrims; i++)
         {
             for (size_t j = 0; j < 3; j++)
-                cluster.Indices[3 * i + j] = inputVertexIndices[3 * mort[i].idx + j];
-
-            cluster.PrimIDs[i] = inputPrimIDs[mort[i].idx];
-        }
-        if (!cluster.Attributes.empty())
-        {
-            auto inputAttribs = cluster.Attributes;
-            for (size_t i = 0; i < numPrims; i++)
-                cluster.Attributes[i] = inputAttribs[mort[i].idx];
-        }
+                sortedIndices[3 * i + j] = cluster.Indices[3 * mort[i].idx + j];
+            inputPrimIndices[i] = mort[i].idx;
+            sortedAttribs[i] = attribs[mort[i].idx];
+        }    
     }
 
 
-    void PackBlocksHPG24( std::vector<DGF::Cluster>& clusters, PerformanceData& perfData, int8_t exponent, const DGFBaker::Config& config )
+    PackClusterResult PackClusterHPG24(
+        uint32_t primIDBase, 
+        const PackClusterInputs& cluster,
+        PerformanceData& perfData, 
+        const DGFBaker::Config& config )
     {
-        DGF::Timer t;
+        size_t numTris = cluster.numTris;
+        size_t numVerts = cluster.numVerts;
 
-        std::vector<DGF::BlockDesc> blocks;
-        std::vector<DGF::int3> quantizedVerts;
+        std::vector<int3> quantizedVerts;
+        quantizedVerts.resize(numVerts);
 
-        size_t clusterPrimIDPrefix = 0;
-        for (DGF::Cluster& cluster : clusters)
+        DGFBaker::TriangleAttributes sortedAttribs[DGFBaker::MAX_CLUSTER_FACES];
+        uint8_t sortedIndices[DGFBaker::MAX_CLUSTER_FACES * 3];
+        uint8_t inputIndices[DGFBaker::MAX_CLUSTER_FACES]; // position of each sorted triangle in input cluster
+        MortonSort(cluster, inputIndices, sortedIndices, sortedAttribs, cluster.Attributes );
+
         {
-            size_t numTris = cluster.Indices.size() / 3;
-            size_t numVerts = cluster.Vertices.size();
-
-            quantizedVerts.resize(numVerts);
-
-            MortonSort(cluster);
-
-            {
-                DGF::Timer t;
-                DGF::QuantizeVerts(quantizedVerts, cluster.Vertices, exponent);
-                perfData.QuantizeVertices += t.Tick();
-            }
-
-            cluster.localRemap.resize(numTris);
-            DGF::BuildBlocks(blocks, cluster.localRemap, perfData, quantizedVerts, exponent, cluster.Indices, cluster.Attributes,
-                config.blockMaxTris, config.blockMaxVerts, config.blockForcedOffsetWidth, config.enableUserData);
-
-            // offset the primitive IDs for this cluster
-            for (DGF::BlockDesc& block : blocks)
-                block.primBase += clusterPrimIDPrefix;
-
-            DGF::EncodeBlocks(cluster, perfData, blocks, config.enableUserData, config.encoderRoundTripValidation );
-
-            clusterPrimIDPrefix += numTris;
-
-            blocks.clear();
+            Timer t;
+            QuantizeVerts(quantizedVerts, cluster.Verts, cluster.exponent);
+            perfData.QuantizeVertices += t.Tick();
         }
+        PackClusterResult packResult;
+        packResult.localRemap.resize(numTris);
 
-        perfData.PackTriangles += t.Tick();
+        std::span<const uint8_t> indexSpan(sortedIndices, cluster.numTris * 3);
+
+        std::vector<BlockDesc> blocks;
+        BuildBlocks(blocks, packResult.localRemap, perfData, quantizedVerts, cluster.exponent, indexSpan, sortedAttribs,
+            config.blockMaxTris, config.blockMaxVerts, config.blockForcedOffsetWidth, config.enableUserData);
+
+        // offset the primitive IDs for this cluster
+        for (BlockDesc& block : blocks)
+            block.primBase += primIDBase;
+
+        // shuffle primIDs to account for the morton ordering
+        for (auto& remap : packResult.localRemap)
+            remap.InputPrimID = inputIndices[remap.InputPrimID];
+
+        EncodeBlocks(packResult.dgfBlocks, packResult.outputOMMIndices, perfData, blocks, config.enableUserData, config.encoderRoundTripValidation);
+
+        return packResult;
     }
 }

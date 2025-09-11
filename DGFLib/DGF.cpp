@@ -208,6 +208,7 @@ namespace DGF
 
         meta->numOMMDescriptors     = header->omm_descriptor_count;
         meta->numOMMHotPatchDwords  = (uint8_t) GetOMMHotPatchSectionDwordSize(block);
+        meta->reuseBufferIndexSize  = header->bits_per_index + 3;
     }
 
     size_t DecodeTriangleCount(const uint8_t* block)
@@ -461,6 +462,28 @@ namespace DGF
         return numVerts;
     }
 
+    size_t DecodeStoredIndicesCount(const uint8_t* block)
+    {
+        size_t numTris = DecodeTriangleCount(block);
+        size_t numStoredIndices = 0;
+        for (size_t i = 1; i < numTris; i++)
+        {
+            // remaining triangles reference 3 indices on restart, 1 index otherwise
+            size_t ctrl = ReadBits(block, 1024 - 2 * i, 2);
+
+            DGF_ASSERT(ctrl == TriControlValues::TC_RESTART ||
+                ctrl == TriControlValues::TC_EDGE1 ||
+                ctrl == TriControlValues::TC_EDGE2 ||
+                ctrl == TriControlValues::TC_BACKTRACK);
+
+            if (ctrl == TriControlValues::TC_RESTART)
+                numStoredIndices += 3;
+            else
+                numStoredIndices++;
+        }
+        return numStoredIndices;
+    }
+
     void DecodeGeomIDs( uint32_t* pIDs, uint8_t* pOpaqueFlags, const uint8_t* block )
     {
         const BlockHeader* header = reinterpret_cast<const BlockHeader*>(block);
@@ -487,8 +510,8 @@ namespace DGF
             size_t indexBitSize   = BitsNeededUnsigned((uint32_t)numIDs - 1);
 
             DGF_ASSERT( numIDs <= DGF::MAX_GEOM_IDS && numIDs > 0 );
-            DGF_ASSERT( prefixBitSize <= DGF::MAX_GEOMID_BITS );
-            DGF_ASSERT( payloadBitSize <= DGF::MAX_GEOMID_BITS );
+            DGF_ASSERT( prefixBitSize <= DGF::MAX_GEOMID_BITS+1 );
+            DGF_ASSERT( payloadBitSize <= DGF::MAX_GEOMID_BITS+1 );
 
             size_t ommSize      = GetOMMPaletteBitSize(block)/8;
             size_t vertSize     = GetVertexDataBitSize(block)/8;
@@ -562,17 +585,26 @@ namespace DGF
         return FloatVert {static_cast<float>(meta.anchorX) * scale, static_cast<float>(meta.anchorY) * scale, static_cast<float>(meta.anchorZ) * scale};
     }
 
+    void ConvertOffsetsToFloat(size_t numVerts, FloatVert* pVerts, const OffsetVert* pOffsets, int32_t anchor[3], uint8_t exponent )
+    {
+        float scale = std::ldexp(1.0f, exponent - EXPONENT_BIAS);
+        int anchorX = anchor[0];
+        int anchorY = anchor[1];
+        int anchorZ = anchor[2];
+        for (size_t i = 0; i < numVerts; i++)
+        {
+            pVerts[i].xyz[0] = static_cast<float>(pOffsets[i].xyz[0] + anchorX) * scale;
+            pVerts[i].xyz[1] = static_cast<float>(pOffsets[i].xyz[1] + anchorY) * scale;
+            pVerts[i].xyz[2] = static_cast<float>(pOffsets[i].xyz[2] + anchorZ) * scale;
+        }
+    }
+
     void ConvertOffsetsToFloat(size_t numVerts, FloatVert* pVerts, const OffsetVert* pOffsets, const MetaData& meta)
     {
         DGF_ASSERT(numVerts <= DGF::MAX_VERTS);
 
-        float scale = std::ldexp(1.0f, meta.exponent - EXPONENT_BIAS);
-        for (size_t i = 0; i < numVerts; i++)
-        {
-            pVerts[i].xyz[0] = static_cast<float>(pOffsets[i].xyz[0] + meta.anchorX) * scale;
-            pVerts[i].xyz[1] = static_cast<float>(pOffsets[i].xyz[1] + meta.anchorY) * scale;
-            pVerts[i].xyz[2] = static_cast<float>(pOffsets[i].xyz[2] + meta.anchorZ) * scale;
-        }
+        int32_t anchor[] = { meta.anchorX, meta.anchorY, meta.anchorZ };
+        ConvertOffsetsToFloat(numVerts, pVerts, pOffsets, anchor, meta.exponent);        
     }
 
     void DecodeTriangleOMMIndices(uint8_t* pOMMIndices, const uint8_t* block)
@@ -718,6 +750,7 @@ namespace DGF
         DGF_ASSERT( input.numTris <= MAX_TRIS && input.numTris > 0 );
         DGF_ASSERT( (input.primIDBase + input.numTris - 1) <= MAX_PRIMID );
         DGF_ASSERT( (input.xBits + input.yBits + input.zBits) % VERTEX_BIT_ALIGNMENT == 0 );
+        DGF_ASSERT( input.xBits > 0 && input.yBits > 0 && input.zBits > 0 );
         DGF_ASSERT(input.numOMMDescriptors <= MAX_OMM_DESCRIPTORS);
         DGF_ASSERT( bitsPerIndex <= MAX_INDEX_BITS && bitsPerIndex >= MIN_INDEX_BITS );
         DGF_ASSERT( input.numVerts <= MAX_VERTS && input.numVerts > 0 );
@@ -831,7 +864,7 @@ namespace DGF
         for (size_t i = 1; i < numPayloads; i++)
             diff |= payloads[i] ^ payloads[0];
 
-        size_t prefixSize  = lzcount(diff << 7); // force a 25b total size
+        size_t prefixSize  = lzcount(diff) - 7; // force a 25b total size
         size_t payloadSize = 25 - prefixSize;
         size_t indexSize   = BitsNeededUnsigned(numPayloads - 1);
 
@@ -1054,6 +1087,100 @@ namespace DGF
             }
         }
     }
+
+    void PatternMatchStrip(TriControlValues* ctrl, uint8_t* indices, const uint8_t* triList, size_t numTris)
+    {
+        // first triangle is always a restart
+        ctrl[0] = DGF::TC_RESTART;
+        indices[0] = triList[0];
+        indices[1] = triList[1];
+        indices[2] = triList[2];
+
+        size_t indexPos = 3;
+        for( size_t i=1; i<numTris; i++ )
+        {
+            uint8_t v0 = triList[3 * i + 0];
+            uint8_t v1 = triList[3 * i + 1];
+            uint8_t v2 = triList[3 * i + 2];
+            uint8_t p0 = triList[3 * (i - 1) + 0];
+            uint8_t p1 = triList[3 * (i - 1) + 1];
+            uint8_t p2 = triList[3 * (i - 1) + 2];
+
+            // by default we'll do a restart
+            TriControlValues code = DGF::TC_RESTART;
+
+            // match edge0 and edge1 cases
+            // 0----1
+            //   \ |
+            //    \|
+            //     2
+            if (p1 == v1 && p2 == v0)
+                code = DGF::TC_EDGE1;    // triangle dangles from second edge (1,2)
+            else if (p2 == v1 && p0 == v0)
+                code = DGF::TC_EDGE2;    // triangle dangles from third edge (2,0)
+            else if( i >= 2 )
+            {
+                // match backtrack cases
+                DGF::TriControlValues cp = ctrl[i - 1];
+                uint8_t pp0 = triList[3*(i - 2) + 0];
+                uint8_t pp1 = triList[3*(i - 2) + 1];
+                uint8_t pp2 = triList[3*(i - 2) + 2];
+                bool backtrack1 = (cp == DGF::TC_EDGE1 && pp2 == v1 && pp0 == v0);
+                bool backtrack2 = (cp == DGF::TC_EDGE2 && pp1 == v1 && pp2 == v0);
+                if (backtrack1 || backtrack2)
+                    code = DGF::TC_BACKTRACK;
+            }
+
+            ctrl[i] = code;
+            if (code == DGF::TC_RESTART)
+            {
+                indices[indexPos++] = v0;
+                indices[indexPos++] = v1;
+                indices[indexPos++] = v2;
+            }
+            else
+            {
+                indices[indexPos++] = v2;
+            }
+        }
+    }
+
+    size_t AdjustVertexWidths(uint8_t bpvOut[3], const uint8_t bpvIn[3])
+    {
+        size_t x = bpvIn[0];
+        size_t y = bpvIn[1];
+        size_t z = bpvIn[2];
+        x = (x == 0) ? 1 : x;
+        y = (y == 0) ? 1 : y;
+        z = (z == 0) ? 1 : z;
+
+        size_t bpv = x + y + z;
+        size_t roundedBits = RoundUpPow2(bpv, 4);
+        size_t extraBits = roundedBits - bpv;
+
+        size_t xAdjust = std::min(extraBits, MAX_VERTEX_COMPONENT_BITS - x);
+        x += xAdjust;
+        extraBits -= xAdjust;
+
+        size_t yAdjust = std::min(extraBits, MAX_VERTEX_COMPONENT_BITS - y);
+        y += yAdjust;
+        extraBits -= yAdjust;
+
+        size_t zAdjust = std::min(extraBits, MAX_VERTEX_COMPONENT_BITS - z);
+        z += zAdjust;
+
+        DGF_ASSERT(x > 0 && x <= MAX_VERTEX_COMPONENT_BITS);
+        DGF_ASSERT(y > 0 && y <= MAX_VERTEX_COMPONENT_BITS);
+        DGF_ASSERT(z > 0 && z <= MAX_VERTEX_COMPONENT_BITS);
+        DGF_ASSERT((x + y + z) % VERTEX_BIT_ALIGNMENT == 0);
+
+        bpvOut[0] = (uint8_t)x;
+        bpvOut[1] = (uint8_t)y;
+        bpvOut[2] = (uint8_t)z;        
+        return x + y + z;
+    }
+
+
 } // namespace DGF
 
 
