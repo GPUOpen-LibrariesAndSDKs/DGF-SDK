@@ -25,6 +25,8 @@
 
 #include <xmmintrin.h>
 #include <emmintrin.h>
+#include <immintrin.h>
+#include <bit>
 
 #include "Utils.h"
 
@@ -103,6 +105,21 @@ namespace DGFBaker
     inline int RoundToInt(float f)
     {
         return _mm_cvtss_si32(_mm_set_ss(f));
+    }
+
+    inline uint32_t asuint(float f)
+    {
+        return std::bit_cast<uint32_t>(f);
+    }
+
+    inline float asfloat(uint32_t u)
+    {
+        return std::bit_cast<float>(u);
+    }
+
+    inline float Exp2(int8_t exponent)
+    {
+        return asfloat((exponent + DGF::EXPONENT_BIAS) << 23);
     }
 
     class SIMDBox

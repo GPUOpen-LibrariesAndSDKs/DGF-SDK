@@ -88,6 +88,35 @@ namespace vk
         m_allocation = m_renameChain[frameIndex].allocation;
     }
 
+    void* DynamicBuffer::Map(size_t frameIndex)
+    {
+        void* pData;
+        vmaMapMemory(GetAllocator(), m_renameChain[frameIndex].allocation, &pData);
+
+        // redirect the base buffer pointer at the current buffer
+        //   This ensures that the most recent buffer is used whenever the buffer is bound on a command list
+        m_buffer = m_renameChain[frameIndex].buffer;
+        m_allocation = m_renameChain[frameIndex].allocation;
+        return pData;
+    }
+
+    void DynamicBuffer::Unmap(size_t frameIndex, size_t bytesWritten)
+    {
+        vmaUnmapMemory(GetAllocator(), m_renameChain[frameIndex].allocation);
+    }
+
+    void* Buffer::Map(size_t writeRange)
+    {
+        void* pData;
+        vmaMapMemory(GetAllocator(), m_allocation, &pData);
+        return pData;
+    }
+
+    void Buffer::Unmap(size_t readRange)
+    {
+        vmaUnmapMemory(GetAllocator(), m_allocation);
+    }
+
     void CommandList::BeginRenderPass(api::Viewport vp, api::ScissorRect rect,
         api::Texture* backBuffer, api::Texture* zBuffer,
         uint32_t clearFlags, const float clearColor[4], float clearDepth )
@@ -306,7 +335,7 @@ namespace vk
     {
         vk::Texture* dest = static_cast<vk::Texture*>(uav);
 
-        VkDescriptorImageInfo dii;
+        VkDescriptorImageInfo dii = {};
         dii.imageView = dest->GetImageView();
         dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
@@ -375,7 +404,7 @@ namespace vk
                 ASG.geometry.instances.arrayOfPointers = VK_FALSE;
                 ASG.geometry.instances.data.deviceAddress = GetBufferAddress(desc.TLAS.InstanceBuffer, desc.TLAS.InstancesByteOffset);
 
-                ASBRI.primitiveCount = 1;
+                ASBRI.primitiveCount = desc.TLAS.NumInstances;
 
                 break;
             }
@@ -1374,7 +1403,7 @@ namespace vk
         return new Texture(image, image_view, this, VK_IMAGE_ASPECT_COLOR_BIT, { width, height, 1});
     }
 
-    vk::RTAS* Device::CreateRTAS(size_t size)
+    vk::RTASBuffer* Device::CreateRTASBuffer(size_t size)
     {
         VkBufferCreateInfo bufCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         bufCreateInfo.size = size;
@@ -1390,15 +1419,23 @@ namespace vk
         VmaAllocationInfo allocInfo;
         vmaCreateBuffer(m_vmaAllocator, &bufCreateInfo, &allocCreateInfo, &buf, &alloc, &allocInfo);
 
+        return new RTASBuffer(buf, m_vmaAllocator, alloc, m_device);
+    }
+
+    vk::RTAS* Device::CreateRTAS(api::RTASBuffer* buffer, size_t offset, size_t size)
+    {
+        vk::RTASBuffer* vkBuffer = static_cast<vk::RTASBuffer*>(buffer);
+
         VkAccelerationStructureCreateInfoKHR asci = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-        asci.buffer = buf;
+        asci.buffer = vkBuffer->GetBuffer();
+        asci.offset = offset;
         asci.size = size;
         asci.type = VK_ACCELERATION_STRUCTURE_TYPE_GENERIC_KHR;
 
         VkAccelerationStructureKHR as;
         CHECK_IF_FAILED(vkCreateAccelerationStructureKHR(m_device, &asci, nullptr, &as));
 
-        return new RTAS(buf, m_vmaAllocator, alloc, m_device, as);
+        return new RTAS(vkBuffer, m_device, as);
     }
 
     constexpr VkFlags BUFFER_USAGE_GENERIC =
@@ -1644,6 +1681,9 @@ namespace vk
             delete list;
         m_frames[m_frameIndex].commandLists.clear();
         
+        for (api::FrameSyncCallback& callback : m_frames[m_frameIndex].syncCallbacks)
+            callback();
+
         CHECK_IF_FAILED(vkResetDescriptorPool(m_device, m_frames[m_frameIndex].descriptorPool, 0));
     }
 
@@ -1651,7 +1691,7 @@ namespace vk
     {
         vkDeviceWaitIdle(m_device);
 
-        // all frames have now retired.. reap all command lists
+        // all frames have now retired.. reap all command lists and execute all sync callbacks
         for (size_t i = 0; i < api::FRAME_COUNT; i++)
         {
             for (vk::CommandList* cl : m_frames[i].commandLists)
@@ -1659,6 +1699,10 @@ namespace vk
 
             m_frames[i].commandLists.clear();
             CHECK_IF_FAILED(vkResetDescriptorPool(m_device, m_frames[i].descriptorPool, 0));
+
+            for (api::FrameSyncCallback& callback : m_frames[i].syncCallbacks)
+                callback();
+            m_frames[i].syncCallbacks.clear();
         }
     }
 
@@ -1726,9 +1770,59 @@ namespace vk
         dyn_buffer->Write(contents, size, m_frameIndex);
     }
 
+    void* Device::MapDynamicBuffer(api::Buffer* buffer)
+    {
+        vk::DynamicBuffer* dyn_buffer = static_cast<vk::DynamicBuffer*>(buffer);
+        return dyn_buffer->Map(m_frameIndex);
+    }
+
+    void Device::UnmapDynamicBuffer(api::Buffer* buffer,size_t bytesWritten)
+    {
+        vk::DynamicBuffer* dyn_buffer = static_cast<vk::DynamicBuffer*>(buffer);
+        dyn_buffer->Unmap(m_frameIndex, bytesWritten);
+    }
+
+    void Device::ScheduleFrameSyncCallback(api::FrameSyncCallback cb)
+    {
+        m_frames[m_frameIndex].syncCallbacks.push_back(std::move(cb));
+    }
+
+
+    vk::Buffer* Device::CreateUploadBuffer(size_t size)
+    {
+        VkBufferCreateInfo bufCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bufCreateInfo.size = size;
+        bufCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+        VmaAllocationCreateInfo allocCreateInfo = {};
+        allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocCreateInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+
+        VkBuffer buf;
+        VmaAllocation alloc;
+        VmaAllocationInfo allocInfo;
+        vmaCreateBuffer(m_vmaAllocator, &bufCreateInfo, &allocCreateInfo, &buf, &alloc, &allocInfo);
+
+        return new vk::Buffer(buf, m_device, m_vmaAllocator, alloc);
+    }
+
+    void* Device::MapBuffer(api::Buffer* buffer, size_t readSize)
+    {
+        vk::Buffer* vkBuffer = static_cast<vk::Buffer*>(buffer);
+        return vkBuffer->Map(readSize);
+    }
+
+    void Device::UnmapBuffer(api::Buffer* buffer, size_t writeSize)
+    {
+        vk::Buffer* vkBuffer = static_cast<vk::Buffer*>(buffer);
+        vkBuffer->Unmap(writeSize);
+    }
+
+
     Device* CreateDevice(HWND hwnd, HINSTANCE hInstance, uint32_t width, uint32_t height)
     {
         return new Device(hwnd,hInstance,width,height);        
     }
+
 
 }

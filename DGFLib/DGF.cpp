@@ -174,6 +174,12 @@ namespace DGF
         return (header->geom_id_meta) & 0x1f;
     }
 
+    bool BlockHasUserData(const uint8_t* block)
+    {
+        const BlockHeader* header = reinterpret_cast<const BlockHeader*>(block);
+        return header->have_user_data;
+    }
+
     void DecodeMetaData(MetaData* meta, const uint8_t* block)
     {
         const BlockHeader* header = reinterpret_cast<const BlockHeader*>(block);
@@ -215,6 +221,11 @@ namespace DGF
     {
         const BlockHeader* header = reinterpret_cast<const BlockHeader*>(block);
         return header->num_triangles+1;
+    }
+    size_t DecodeOMMDescriptorCount(const uint8_t* block)
+    {
+        const BlockHeader* header = reinterpret_cast<const BlockHeader*>(block);
+        return header->omm_descriptor_count;
     }
     size_t DecodeVertexCount(const uint8_t* block)
     {
@@ -329,7 +340,7 @@ namespace DGF
             return 0;
 
         size_t numHotPatchDwords = 2 + numDescriptors;
-        size_t ommIndexSize = GetOMMIndexSize(numTris);
+        size_t ommIndexSize = GetOMMIndexSize(numDescriptors);
         return 32 * numHotPatchDwords + RoundUpPow2(ommIndexSize * numTris, 8);
     }
 
@@ -504,41 +515,73 @@ namespace DGF
         else
         {
             // palette mode
-            size_t numIDs         = DecodeGeomIDPaletteIDCount(header);
-            size_t prefixBitSize  = DecodeGeomIDPalettePrefixSize(header);
-            size_t payloadBitSize = (DGF::MAX_GEOMID_BITS+1) - prefixBitSize;
-            size_t indexBitSize   = BitsNeededUnsigned((uint32_t)numIDs - 1);
+            uint32_t entries[DGF::MAX_GEOM_IDS];
+            uint8_t indices[DGF::MAX_TRIS];
+            DecodeGeomIDPalette(entries, indices, block);
 
-            DGF_ASSERT( numIDs <= DGF::MAX_GEOM_IDS && numIDs > 0 );
-            DGF_ASSERT( prefixBitSize <= DGF::MAX_GEOMID_BITS+1 );
-            DGF_ASSERT( payloadBitSize <= DGF::MAX_GEOMID_BITS+1 );
+            for (size_t i = 0; i < numTris; i++)
+            {
+                uint32_t entry = entries[indices[i]];
+                pIDs[i] = entry >> 1;
+                pOpaqueFlags[i] = entry & 1;
+            }
+        }
+    }
 
-            size_t ommSize      = GetOMMPaletteBitSize(block)/8;
-            size_t vertSize     = GetVertexDataBitSize(block)/8;
+    size_t DecodeGeomIDPalette(uint32_t* pEntries, uint8_t* pTriangleIndices, const uint8_t* block)
+    {
+        const BlockHeader* header = reinterpret_cast<const BlockHeader*>(block);
+        size_t numTris = header->num_triangles + 1;
+        DGF_ASSERT(numTris <= DGF::MAX_TRIS);
+        if (header->geom_id_mode == 0)
+        {
+            // constant mode
+            pEntries[0] = header->geom_id_meta;
+            for (size_t i = 0; i < numTris; i++)
+                pTriangleIndices[i] = 0;
+            return 1;
+        }
+        else
+        {
+            // palette mode
+            size_t numIDs = DecodeGeomIDPaletteIDCount(header);
+            size_t prefixBitSize = DecodeGeomIDPalettePrefixSize(header);
+            size_t payloadBitSize = (DGF::MAX_GEOMID_BITS + 1) - prefixBitSize;
+            size_t indexBitSize = BitsNeededUnsigned((uint32_t)numIDs - 1);
+
+            DGF_ASSERT(numIDs <= DGF::MAX_GEOM_IDS && numIDs > 0);
+            DGF_ASSERT(prefixBitSize <= DGF::MAX_GEOMID_BITS + 1);
+            DGF_ASSERT(payloadBitSize <= DGF::MAX_GEOMID_BITS + 1);
+
+            size_t ommSize = GetOMMPaletteBitSize(block) / 8;
+            size_t vertSize = GetVertexDataBitSize(block) / 8;
             size_t userDataSize = GetUserDataBitSize(block) / 8;
 
             const uint8_t* paletteBits = block + sizeof(BlockHeader) + ommSize + vertSize + userDataSize;
 
-            uint32_t geomIDPrefix = (uint32_t) ReadBits(paletteBits, 0, prefixBitSize );
+            uint32_t geomIDPrefix = (uint32_t)ReadBits(paletteBits, 0, prefixBitSize);
             geomIDPrefix = geomIDPrefix << payloadBitSize;
 
-            size_t indexOffset   = prefixBitSize;
-            size_t payloadOffset = indexOffset + numTris*indexBitSize;
-
+            size_t indexOffset = prefixBitSize;
+            size_t payloadOffset = indexOffset + numTris * indexBitSize;
             for (size_t i = 0; i < numTris; i++)
             {
-                size_t payloadIndex      = ReadBits(paletteBits, indexOffset, indexBitSize);
-                size_t payloadPos        = payloadOffset + payloadIndex*payloadBitSize;
-                uint32_t geomIDPayload   = (uint32_t) ReadBits(paletteBits, payloadPos, payloadBitSize);
-                uint32_t reconstructedID = geomIDPayload | geomIDPrefix;
-
-                pIDs[i]         = reconstructedID >> 1;
-                pOpaqueFlags[i] = reconstructedID & 1;
-
-                indexOffset += indexBitSize;
+                size_t indexPos = indexOffset + indexBitSize * i;
+                size_t payloadIndex = ReadBits(paletteBits, indexPos, indexBitSize);
+                pTriangleIndices[i] = (uint8_t)payloadIndex;
             }
+
+            for (size_t i = 0; i < numIDs; i++)
+            {
+                size_t payloadPos = payloadOffset + payloadBitSize * i;
+                uint32_t geomIDPayload = (uint32_t)ReadBits(paletteBits, payloadPos, payloadBitSize);
+                pEntries[i] = geomIDPayload | geomIDPrefix;
+            }
+
+            return numIDs;
         }
     }
+
 
     void DecodeOffsetVerts(size_t numVerts, OffsetVert* pVerts, const uint8_t* block)
     {
@@ -775,23 +818,20 @@ namespace DGF
 
     static size_t EncodeOMMPalette( uint8_t* block, size_t bitPos, const EncoderInput& input )
     {
+        DGF_ASSERT((bitPos % 8) == 0);
+
         if (input.numOMMDescriptors == 0)
             return 0;
 
         size_t startPos = bitPos;
 
-        // clear hot-patched section
-        WriteBits(block, bitPos, 64, 0);
-        bitPos += 64;
-        size_t descriptorCount = input.numOMMDescriptors;
-        for (size_t i = 0; i < descriptorCount; i++ )
-        {
-            WriteBits(block, bitPos, 32, 0);
-            bitPos += 32;
-        }
+        // clear hot-patched section        
+        size_t hotPatchByteSize = 4 * (2 + input.numOMMDescriptors);
+        memset(block + (bitPos / 8), 0, hotPatchByteSize);
+        bitPos += 8 * hotPatchByteSize;
 
         // write pre-computed section
-        size_t indexSize = descriptorCount / 2;
+        size_t indexSize = GetOMMIndexSize(input.numOMMDescriptors);
         for (size_t i = 0; i < input.numTris; i++)
         {
             size_t idx = input.triangleOMMDescriptorIndices[i];

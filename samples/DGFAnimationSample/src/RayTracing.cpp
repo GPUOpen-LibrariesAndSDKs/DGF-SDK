@@ -78,7 +78,7 @@ void DGFAnimationSample::RenderRaytraced(api::CommandList* cmdList, api::Texture
 void DGFAnimationSample::BuildBVH(api::CommandList* cmdList)
 {    
     // build the blas
-    m_dgfBvhBuilder.Build(m_rtasDecodeBuffer.Get(), 0, m_asScratchResource.Get(), m_blas.Get(), *m_dgfMesh, cmdList, m_uiData.useNativeDGF, m_timerHeap.Get(), 4);
+    m_dgfBvhBuilder.Build(m_rtasDecodeBuffer.Get(), 0, m_asScratchResource.Get(), 0, m_blas.Get(), m_dgfMesh->GetDGFBLASDesc(), cmdList, m_uiData.useNativeDGF, m_timerHeap.Get(), 4);
     cmdList->UAVBarrier();
 
     // build the tlas
@@ -113,7 +113,7 @@ void DGFAnimationSample::BuildBVH(api::CommandList* cmdList)
 
 void DGFAnimationSample::AllocateBVHResources()
 {
-    DGFBVHBuilder::PrebuildInfo dgfPBI = m_dgfBvhBuilder.GetPrebuildInfo(*m_dgfMesh, m_uiData.useNativeDGF);
+    DGFBVHBuilder::PrebuildInfo dgfPBI = m_dgfBvhBuilder.GetPrebuildInfo(m_dgfMesh->GetDGFBLASDesc(), m_uiData.useNativeDGF);
 
     api::RTASDesc tlasDesc;
     tlasDesc.Type                = api::RTASType::TOP_LEVEL;
@@ -125,8 +125,13 @@ void DGFAnimationSample::AllocateBVHResources()
 
     size_t scratchResourceSize = std::max(dgfPBI.bvhBuildScratchSize, (UINT)tlasPBI.buildScratchSize);
 
-    m_tlas = m_device->CreateRTAS(tlasPBI.rtasSize);
-    m_blas = m_device->CreateRTAS(dgfPBI.bvhSize);
+    m_blasOffset = 0;
+    m_tlasOffset = RoundUpPow2(dgfPBI.bvhSize, api::RTAS_ALIGNMENT);    
+    size_t totalRTASSize = m_tlasOffset + tlasPBI.rtasSize;
+    
+    m_rtasBuffer = m_device->CreateRTASBuffer(totalRTASSize);
+    m_blas = m_device->CreateRTAS(m_rtasBuffer.Get(), m_blasOffset, dgfPBI.bvhSize);
+    m_tlas = m_device->CreateRTAS(m_rtasBuffer.Get(), m_tlasOffset, tlasPBI.rtasSize);
 
     m_asScratchResource  = m_device->CreateUAVBuffer(scratchResourceSize);
     m_rtasDecodeBuffer   = m_device->CreateUAVBuffer(dgfPBI.decodeScratchSize);

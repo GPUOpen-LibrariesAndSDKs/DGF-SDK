@@ -22,7 +22,10 @@
 
 set( DGF_BAKER_DIR ${CMAKE_CURRENT_SOURCE_DIR} )
 
-set( DGF_BAKER_API ${DGF_BAKER_DIR}/include/DGFBaker.h )
+set( DGF_BAKER_API 
+    ${DGF_BAKER_DIR}/include/DGFBaker.h
+    ${DGF_BAKER_DIR}/include/DGFS.h
+)
 
 set( DGF_BAKER_SOURCES
      ${DGF_BAKER_DIR}/source/Utils.h
@@ -31,6 +34,7 @@ set( DGF_BAKER_SOURCES
      ${DGF_BAKER_DIR}/source/Cluster.h
      ${DGF_BAKER_DIR}/source/Quantization.h 
      ${DGF_BAKER_DIR}/source/Quantization.cpp    
+     ${DGF_BAKER_DIR}/source/QuantizationTest.cpp    
      ${DGF_BAKER_DIR}/source/HPG24BlockPacker.h 
      ${DGF_BAKER_DIR}/source/HPG24BlockPacker.cpp
      ${DGF_BAKER_DIR}/source/DebugOutput.h 
@@ -43,6 +47,8 @@ set( DGF_BAKER_SOURCES
      ${DGF_BAKER_DIR}/source/SAHBlockPacker.h 
      ${DGF_BAKER_DIR}/source/SAHBlockPacker.cpp
      ${DGF_BAKER_DIR}/source/SIMD.h     
+     ${DGF_BAKER_DIR}/source/Threading.h
+     ${DGF_BAKER_DIR}/source/DGFS.cpp
 )
 
 add_library( DGFBaker STATIC ${DGF_BAKER_SOURCES} ${DGF_BAKER_API} )
@@ -53,8 +59,8 @@ target_include_directories( DGFBaker
 
 
 
-source_group( api ${DGF_BAKER_API} )
-source_group( src ${DGF_BAKER_SOURCES} )
+source_group( api FILES ${DGF_BAKER_API} )
+source_group( src FILES ${DGF_BAKER_SOURCES} )
 source_group( autogen "cxx|hxx" )
 
 set_property(TARGET DGFBaker PROPERTY CXX_STANDARD 20)

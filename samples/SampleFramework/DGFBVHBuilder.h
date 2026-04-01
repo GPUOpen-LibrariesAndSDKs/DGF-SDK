@@ -42,19 +42,21 @@ public:
 
     void Init(api::Device* device, ShaderCompiler& compiler, uint32_t flags);
 
-    PrebuildInfo GetPrebuildInfo(const DGFMesh& mesh, bool allowNativeDGF) const;
+    PrebuildInfo GetPrebuildInfo(const api::DGFBLASDesc& desc,bool allowNativeDGF) const;
 
     void Build( 
         api::Buffer* decodeScratch,
         size_t decodeOffset,
         api::Buffer* buildScratch,
+        size_t scratchOffset,
         api::RTAS* destination,
-        const DGFMesh& mesh,
+        const api::DGFBLASDesc& dgfBlasDesc,
         api::CommandList* cmdList,
         bool allowNativeDGF,
         api::TimerHeap* timers = nullptr,
         size_t timerOffset = 0
         );
+
 
 private:
 

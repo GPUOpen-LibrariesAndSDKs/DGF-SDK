@@ -32,7 +32,7 @@
 #include <d3dcompiler.h>
 
 extern "C" {
-    __declspec(dllexport) extern const UINT D3D12SDKVersion = 614;
+    __declspec(dllexport) extern const UINT D3D12SDKVersion = AGILITY_SDK_VERSION;
 }  // or later
 extern "C" {
     __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
@@ -201,12 +201,36 @@ namespace dx
             m_renameChain[i] = renameChain[i];        
     }
 
-    void DynamicBuffer::Write(const void* contents, size_t size, size_t frameIndex)
+    void* DynamicBuffer::Map(size_t frameIndex)
     {
         void* pData;
         m_renameChain[frameIndex]->Map(0, nullptr, &pData);
+
+        // redirect the base buffer pointer at the current buffer
+        //   This ensures that the most recent buffer is used whenever the buffer is bound on a command list
+        //    The application must unmap buffers in the same frame as the 'Map()', but commands can be recorded before unmapping is done
+        m_resource = m_renameChain[frameIndex];
+
+        return pData;
+    }
+    void DynamicBuffer::Unmap(size_t frameIndex, size_t bytesWritten)
+    {
+        D3D12_RANGE writeRange;
+        writeRange.Begin = 0;
+        writeRange.End = bytesWritten;
+        m_renameChain[frameIndex]->Unmap(0, &writeRange);       
+    }
+
+    void DynamicBuffer::Write(const void* contents, size_t size, size_t frameIndex)
+    {
+        D3D12_RANGE writeRange;
+        writeRange.Begin = 0;
+        writeRange.End = size;
+
+        void* pData;
+        m_renameChain[frameIndex]->Map(0, nullptr, &pData);
         memcpy(pData, contents, size);
-        m_renameChain[frameIndex]->Unmap(0, nullptr);
+        m_renameChain[frameIndex]->Unmap(0, &writeRange);
         
         // redirect the base buffer pointer at the current buffer
         //   This ensures that the most recent buffer is used whenever the buffer is bound on a command list
@@ -298,7 +322,7 @@ namespace dx
 
     void CommandList::SetComputeRootSRV(size_t paramIndex, api::RTAS* tlas)
     {
-        Get()->SetComputeRootShaderResourceView((UINT)paramIndex, tlas->GetGPUVirtualAddress());
+        Get()->SetComputeRootShaderResourceView((UINT)paramIndex, tlas->GetRTASReference());
     }
 
     void CommandList::SetComputeRootSRV(size_t paramIndex, api::Buffer* buffer, size_t offset )
@@ -326,8 +350,8 @@ namespace dx
     {
         D3D12_RAYTRACING_GEOMETRY_DESC geo;
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd;
-        bd.DestAccelerationStructureData = desc.Destination->GetGPUVirtualAddress();
-        bd.ScratchAccelerationStructureData = GetBufferAddress(desc.Scratch, 0);
+        bd.DestAccelerationStructureData = desc.Destination->GetRTASReference();
+        bd.ScratchAccelerationStructureData = GetBufferAddress(desc.Scratch, desc.ScratchByteOffset);
         bd.SourceAccelerationStructureData = 0;
         bd.Inputs.Flags = TranslateRTASFlags(desc.Flags);
         bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
@@ -822,7 +846,7 @@ namespace dx
         return new Texture(texture,this,d.gpu);
     }
 
-    dx::RTAS* Device::CreateRTAS(size_t size)
+    dx::RTASBuffer* Device::CreateRTASBuffer(size_t size)
     {
         auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
 
@@ -836,7 +860,13 @@ namespace dx
             nullptr,
             IID_PPV_ARGS(&buffer)));
 
-        return new RTAS(buffer);
+        return new RTASBuffer(buffer);
+    }
+
+    dx::RTAS* Device::CreateRTAS(api::RTASBuffer* buffer, size_t offset, size_t size)
+    {
+        dx::RTASBuffer* dxBuffer = static_cast<dx::RTASBuffer*>(buffer);
+        return new RTAS(dxBuffer, offset);
     }
 
     dx::Buffer* Device::CreateUAVBuffer(size_t size)
@@ -954,6 +984,10 @@ namespace dx
         for (api::CommandList* list : m_frames[m_frameIndex].commandLists)
             delete list;
         m_frames[m_frameIndex].commandLists.clear();
+        
+        for (auto& callback : m_frames[m_frameIndex].syncCallbacks)
+            callback();
+        m_frames[m_frameIndex].syncCallbacks.clear();
 
         // Set the fence value for the next frame.
         m_frames[m_frameIndex].fenceValue = currentFenceValue + 1;
@@ -977,6 +1011,10 @@ namespace dx
             for (dx::CommandList* cl : m_frames[i].commandLists)
                 delete cl;
             m_frames[i].commandLists.clear();
+
+            for (auto& callback : m_frames[i].syncCallbacks)
+                callback();
+            m_frames[i].syncCallbacks.clear();
         }
     }
 
@@ -1051,6 +1089,51 @@ namespace dx
         dx::DynamicBuffer* dxBuffer = static_cast<dx::DynamicBuffer*>(buffer);
         dxBuffer->Write(contents, size, m_frameIndex);
     }
+    
+    void* Device::MapDynamicBuffer( api::Buffer* buffer)
+    {
+        dx::DynamicBuffer* dxBuffer = static_cast<dx::DynamicBuffer*>(buffer);
+        return dxBuffer->Map(m_frameIndex);
+    }
+    
+    void Device::UnmapDynamicBuffer(api::Buffer* buffer, size_t bytesWritten)
+    {
+        dx::DynamicBuffer* dxBuffer = static_cast<dx::DynamicBuffer*>(buffer);
+        dxBuffer->Unmap(m_frameIndex, bytesWritten);
+    }
+
+    void Device::ScheduleFrameSyncCallback(api::FrameSyncCallback cb)
+    {
+        m_frames[m_frameIndex].syncCallbacks.push_back(std::move(cb));
+    }
+
+    dx::Buffer* Device::CreateUploadBuffer(size_t size)
+    {
+        ComPtr<ID3D12Resource> upload;
+        auto dafaultResourceDesc = CD3DX12_RESOURCE_DESC::Buffer(size, D3D12_RESOURCE_FLAG_NONE);
+        auto uploadHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+        ThrowIfFailed(m_device->CreateCommittedResource(&uploadHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &dafaultResourceDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(&upload)));
+
+        return new dx::Buffer(std::move(upload));
+    }
+
+    void* Device::MapBuffer(api::Buffer* buffer, size_t readSize)
+    {
+        dx::Buffer* dxBuffer = static_cast<dx::Buffer*>(buffer);
+        return dxBuffer->Map(readSize);
+    }
+
+    void Device::UnmapBuffer(api::Buffer* buffer, size_t writeSize)
+    {
+        dx::Buffer* dxBuffer = static_cast<dx::Buffer*>(buffer);
+        dxBuffer->Unmap(writeSize);
+    }
+
 
     Device* CreateDevice(HWND hwnd, HINSTANCE hi, uint32_t width, uint32_t height) 
     {

@@ -39,7 +39,8 @@ void DGFBVHBuilder::Init(api::Device* device, ShaderCompiler& compiler, uint32_t
     m_flags = flags;
 }
 
-DGFBVHBuilder::PrebuildInfo DGFBVHBuilder::GetPrebuildInfo(const DGFMesh& mesh, bool allowNativeDGF) const
+
+DGFBVHBuilder::PrebuildInfo DGFBVHBuilder::GetPrebuildInfo( const api::DGFBLASDesc& dgfBlasDesc, bool allowNativeDGF ) const
 {
     api::RTASDesc desc;
     desc.Flags = m_flags;
@@ -48,21 +49,15 @@ DGFBVHBuilder::PrebuildInfo DGFBVHBuilder::GetPrebuildInfo(const DGFMesh& mesh, 
     if (allowNativeDGF && m_device->SupportsNativeDGF())
     {
         desc.Type = api::RTASType::DGF_BOTTOM_LEVEL;
-        desc.DGFBLAS.blocks = mesh.GetDGFBlockBuffer();
-        desc.DGFBLAS.blocksByteOffset = 0;
-        desc.DGFBLAS.maxGeometryIndex   = mesh.GetMaxGeometryIndex();
-        desc.DGFBLAS.maxPrimitiveIndex  = mesh.GetMaxPrimitiveIndex();
-        desc.DGFBLAS.numBlocks          = (uint32_t)mesh.GetNumDGFBlocks();
-        desc.DGFBLAS.numTriangles       = (uint32_t)mesh.GetNumBlockTriangles();
-        desc.DGFBLAS.numVertices        = (uint32_t)mesh.GetNumBlockVertices();
+        desc.DGFBLAS = dgfBlasDesc;
     }
     else
     {
         desc.Type = api::RTASType::BOTTOM_LEVEL;
         desc.BLAS.IndexBuffer = 0;
         desc.BLAS.VertexBuffer = 0;
-        desc.BLAS.NumIndices = (uint32_t)(3 * mesh.GetNumBlockTriangles());
-        desc.BLAS.NumVertices = (uint32_t)mesh.GetNumBlockVertices();
+        desc.BLAS.NumIndices = (uint32_t)(3 * dgfBlasDesc.numTriangles);
+        desc.BLAS.NumVertices = (uint32_t)dgfBlasDesc.numVertices;
         desc.BLAS.VertexStride = 12;
         decodeScratchSize = desc.BLAS.NumVertices * 12 + desc.BLAS.NumIndices * 4;
     }
@@ -80,8 +75,9 @@ DGFBVHBuilder::PrebuildInfo DGFBVHBuilder::GetPrebuildInfo(const DGFMesh& mesh, 
 void DGFBVHBuilder::Build(api::Buffer*      decodeScratch,
                           size_t            decodeOffset,
                           api::Buffer*      buildScratch,
+                          size_t            scratchOffset,
                           api::RTAS*        destination,
-                          const DGFMesh&    mesh,
+                          const api::DGFBLASDesc&    dgfBlasDesc,
                           api::CommandList* cmdList, 
                           bool allowNativeDGF,
                           api::TimerHeap* timers, size_t timerOffset )
@@ -94,16 +90,10 @@ void DGFBVHBuilder::Build(api::Buffer*      decodeScratch,
         api::RTASDesc desc;
         desc.Flags = m_flags;
         desc.Type = api::RTASType::DGF_BOTTOM_LEVEL;
-        desc.DGFBLAS.blocks             = mesh.GetDGFBlockBuffer();
-        desc.DGFBLAS.blocksByteOffset   = 0;
-        desc.DGFBLAS.maxGeometryIndex   = mesh.GetMaxGeometryIndex();
-        desc.DGFBLAS.maxPrimitiveIndex  = mesh.GetMaxPrimitiveIndex();
-        desc.DGFBLAS.numBlocks          = (uint32_t)mesh.GetNumDGFBlocks();
-        desc.DGFBLAS.numTriangles       = (uint32_t)mesh.GetNumBlockTriangles();
-        desc.DGFBLAS.numVertices        = (uint32_t)mesh.GetNumBlockVertices();
+        desc.DGFBLAS = dgfBlasDesc;
         desc.Destination       = destination;
         desc.Scratch           = buildScratch;
-        desc.ScratchByteOffset = 0;
+        desc.ScratchByteOffset = scratchOffset;
 
         cmdList->BuildRTAS(desc);
         cmdList->UAVBarrier();
@@ -117,13 +107,13 @@ void DGFBVHBuilder::Build(api::Buffer*      decodeScratch,
             cmdList->RecordTimer(timers, timerOffset + 0);
 
         // run the decode shader first
-        size_t decodeVBOffset = 0;
-        size_t decodeIBOffset = 12 * mesh.GetNumBlockVertices();
+        size_t decodeVBOffset = decodeOffset;
+        size_t decodeIBOffset = decodeVBOffset + 12 * dgfBlasDesc.numVertices;
         cmdList->SetPipelineState(m_decodeShader.Get());
-        cmdList->SetComputeRootSRV(0, mesh.GetDGFBlockBuffer(), 0);
+        cmdList->SetComputeRootSRV(0, dgfBlasDesc.blocks, dgfBlasDesc.blocksByteOffset);
         cmdList->SetComputeRootUAV(1, decodeScratch, decodeVBOffset);
         cmdList->SetComputeRootUAV(2, decodeScratch, decodeIBOffset);
-        cmdList->Dispatch((UINT)mesh.GetNumDGFBlocks(), 1, 1);
+        cmdList->Dispatch((UINT)dgfBlasDesc.numBlocks, 1, 1);
 
         cmdList->BufferBarrier(decodeScratch, api::BufferState::UAV, api::BufferState::SRV);
 
@@ -140,12 +130,12 @@ void DGFBVHBuilder::Build(api::Buffer*      decodeScratch,
         desc.BLAS.VertexBuffer = decodeScratch;
         desc.BLAS.IndexByteOffset = (uint32_t)decodeIBOffset;
         desc.BLAS.VertexByteOffset = (uint32_t)decodeVBOffset;
-        desc.BLAS.NumIndices = (uint32_t)(3 * mesh.GetNumBlockTriangles());
-        desc.BLAS.NumVertices = (uint32_t)mesh.GetNumBlockVertices();
+        desc.BLAS.NumIndices = (uint32_t)(3 * dgfBlasDesc.numTriangles);
+        desc.BLAS.NumVertices = (uint32_t)dgfBlasDesc.numVertices;
         desc.BLAS.VertexStride = 12;
         desc.Destination = destination;
         desc.Scratch = buildScratch;
-        desc.ScratchByteOffset = 0;
+        desc.ScratchByteOffset = (uint32_t)scratchOffset;
 
         cmdList->BuildRTAS(desc);
 

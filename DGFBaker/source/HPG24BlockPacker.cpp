@@ -135,18 +135,17 @@ namespace DGFBaker
             uint32_t payload = block.geomIDPayloads[block.triangleGeomIDIndices[blockTriIndex]];
             outputBlock.triangleGeomIDs[i] = payload >> 1;
             outputBlock.triangleOpaqueFlags[i] = payload & 1;
+            outputBlock.triangleOMMIndices[i] = block.triangleOMMIndices[blockTriIndex];
 
             // replace the remap index with this triangle's position in the original cluster
             uint8_t clusterTriIndex = block.triangleIndices[remapOut[i].InputPrimID];
             remapOut[i].InputPrimID = clusterTriIndex;
         }
 
-        // OMM stuff
+        // copy omm descriptor array
         outputBlock.numOMMDescriptors = block.numOMMDescriptors;
         for (size_t d = 0; d < block.numOMMDescriptors; d++)
             outputBlock.ommDescriptors[d] = block.ommDescriptors[d];
-        memcpy(outputBlock.triangleOMMIndices, block.triangleOMMIndices, block.numTris);
- 
     }
 
     bool AddTriangle(TmpBlock& block,
@@ -259,6 +258,7 @@ namespace DGFBaker
             diffMask |= (block.geomIDPayloads[0] ^ geomIDPayload);
         }
 
+        size_t numOMMDescriptors = 0;
         if (haveOMM)
         {
             // search for this descriptor in the descriptor list
@@ -272,14 +272,18 @@ namespace DGFBaker
                 }
             }
 
+            bool newOMMDescriptor = (descriptorIndex == block.numOMMDescriptors);
+            numOMMDescriptors = block.numOMMDescriptors + (newOMMDescriptor ? 1 : 0);
+
             // store a new descriptor
-            if (descriptorIndex == block.numOMMDescriptors)
+            if (newOMMDescriptor)
             {
                 if (block.numOMMDescriptors == DGF::MAX_OMM_DESCRIPTORS)
                     return false;
-                block.ommDescriptors[block.numOMMDescriptors++] = ommDescriptor;
+                block.ommDescriptors[block.numOMMDescriptors] = ommDescriptor;
             }
 
+            // store triangle OMM index
             block.triangleOMMIndices[triIndexInBlock] = descriptorIndex;
         }
 
@@ -287,7 +291,7 @@ namespace DGFBaker
         size_t geomPaletteSize = GetMaterialIdsBitSize(numGeomIDPayloads, numTris, block.geomIDPayloads[0], diffMask);
 
         // determine omm palette size
-        size_t ommPaletteSize = DGF::ComputeOMMPaletteBitSize(block.numOMMDescriptors, numTris);
+        size_t ommPaletteSize = DGF::ComputeOMMPaletteBitSize(numOMMDescriptors, numTris);
 
         // make sure verts and IDs all fit
         size_t frontBufferSize = vertex_bits + ommPaletteSize + geomPaletteSize;
@@ -321,13 +325,13 @@ namespace DGFBaker
         block.x_bits = x_bits;
         block.y_bits = y_bits;
         block.z_bits = z_bits;
+        block.numOMMDescriptors = numOMMDescriptors;
         return true;
     }
 
     // adds triangles to blocks one by one
     void PackTriangles(std::vector<BlockDesc>& blocksOut,
         std::span<LocalTriangleRemap> remapOut,
-        PerformanceData& perfData,
         std::span<const int3>     clusterVertices,
         std::span<const uint8_t>  clusterIndices,
         std::span<const DGFBaker::TriangleAttributes> clusterAttributes,
@@ -364,12 +368,9 @@ namespace DGFBaker
             while (numUsed < numTris && block.numTris < DGF::MAX_TRIS)
             {
                 // see if we can pack
-                Timer t;
                 bool success = AddTriangle(block, clusterVertices, clusterIndices.data() + 3 * candidate, 
                     clusterGeomIDPayloads[candidate], (uint8_t) candidate, triLimit, vertLimit, clusterGraph, forcedVertexWidth, 
                     userData, clusterAttributes[candidate].hasOMM, clusterAttributes[candidate].ommIndex );
-
-                perfData.AddTriangle += t.Tick();
 
                 // block is full?
                 if (!success)
@@ -384,8 +385,7 @@ namespace DGFBaker
                 usedTris.set(candidate);
 
                 // choose a new candidate. favor triangles which share the most verts with those already in the block
-                t.Tick();
-
+                
                 size_t bestCandidate = numTris;
                 size_t bestVertCount = 0;
                 for (size_t i = 0; i < numTris; i++)
@@ -405,7 +405,6 @@ namespace DGFBaker
                     }
                 }
                 candidate = bestCandidate;
-                perfData.PickBestCandidate += t.Tick();
             }
 
             // finalize the block
@@ -415,24 +414,20 @@ namespace DGFBaker
             blockDesc.primBase = primOffset;
             ExportBlock(blockDesc, block, clusterVertices, &remapOut[primOffset], clusterGraph, forcedVertexWidth);
 
-            perfData.ExportBlock += t.Tick();
-            
         } while (numUsed < numTris);
     }
 
-    void BuildBlocks(std::vector<BlockDesc>& blocksOut, std::span<LocalTriangleRemap> remapOut, PerformanceData& perfData,
+    void BuildBlocks(std::vector<BlockDesc>& blocksOut, std::span<LocalTriangleRemap> remapOut,
                      std::span<const int3> clusterVertices, int8_t exponent, std::span<const uint8_t> clusterIndices,
                      std::span<const DGFBaker::TriangleAttributes> clusterAttributes,
                      size_t triLimit, size_t vertLimit, const uint8_t forcedVertexWidth[3], bool enableUserData )
     {
         Timer t;
 
-        PackTriangles(blocksOut, remapOut, perfData, clusterVertices, clusterIndices, clusterAttributes, triLimit, vertLimit, forcedVertexWidth, enableUserData);
+        PackTriangles(blocksOut, remapOut, clusterVertices, clusterIndices, clusterAttributes, triLimit, vertLimit, forcedVertexWidth, enableUserData);
 
         for (auto& block: blocksOut)
             block.exponent = exponent;
-
-        perfData.BuildBlocks += t.Tick();
     }
 
 
@@ -514,11 +509,9 @@ namespace DGFBaker
     void EncodeBlocks(
         std::vector<uint8_t>& blocksOut,
         std::vector<int32_t>& ommIndicesOut,
-        PerformanceData& perfData, 
         const std::vector<BlockDesc>& blockDescs, 
         bool userData, bool validate )
     {
-        Timer t;
         blocksOut.resize(blockDescs.size() * DGF::BLOCK_SIZE);
       
         for (size_t i = 0; i < blockDescs.size(); i++)
@@ -530,8 +523,6 @@ namespace DGFBaker
             for (size_t d = 0; d < blockDesc.numOMMDescriptors; d++)
                 ommIndicesOut.push_back(blockDesc.ommDescriptors[d]);            
         }
-        perfData.EncodeBlocks += t.Tick();
-        perfData.NumBlocks += blockDescs.size();
     }
 
 
@@ -628,34 +619,28 @@ namespace DGFBaker
 
 
     PackClusterResult PackClusterHPG24(
-        uint32_t primIDBase, 
         const PackClusterInputs& cluster,
-        PerformanceData& perfData, 
         const DGFBaker::Config& config )
     {
+        uint32_t primIDBase = cluster.primIDBase;
+
         size_t numTris = cluster.numTris;
         size_t numVerts = cluster.numVerts;
-
-        std::vector<int3> quantizedVerts;
-        quantizedVerts.resize(numVerts);
 
         DGFBaker::TriangleAttributes sortedAttribs[DGFBaker::MAX_CLUSTER_FACES];
         uint8_t sortedIndices[DGFBaker::MAX_CLUSTER_FACES * 3];
         uint8_t inputIndices[DGFBaker::MAX_CLUSTER_FACES]; // position of each sorted triangle in input cluster
         MortonSort(cluster, inputIndices, sortedIndices, sortedAttribs, cluster.Attributes );
-
-        {
-            Timer t;
-            QuantizeVerts(quantizedVerts, cluster.Verts, cluster.exponent);
-            perfData.QuantizeVertices += t.Tick();
-        }
+      
+        
         PackClusterResult packResult;
         packResult.localRemap.resize(numTris);
 
         std::span<const uint8_t> indexSpan(sortedIndices, cluster.numTris * 3);
+        std::span<const int3> quantizedVerts(cluster.QuantizedVerts, cluster.numVerts);
 
         std::vector<BlockDesc> blocks;
-        BuildBlocks(blocks, packResult.localRemap, perfData, quantizedVerts, cluster.exponent, indexSpan, sortedAttribs,
+        BuildBlocks(blocks, packResult.localRemap, quantizedVerts, cluster.exponent, indexSpan, sortedAttribs,
             config.blockMaxTris, config.blockMaxVerts, config.blockForcedOffsetWidth, config.enableUserData);
 
         // offset the primitive IDs for this cluster
@@ -666,7 +651,7 @@ namespace DGFBaker
         for (auto& remap : packResult.localRemap)
             remap.InputPrimID = inputIndices[remap.InputPrimID];
 
-        EncodeBlocks(packResult.dgfBlocks, packResult.outputOMMIndices, perfData, blocks, config.enableUserData, config.encoderRoundTripValidation);
+        EncodeBlocks(packResult.dgfBlocks, packResult.outputOMMIndices, blocks, config.enableUserData, config.encoderRoundTripValidation);
 
         return packResult;
     }

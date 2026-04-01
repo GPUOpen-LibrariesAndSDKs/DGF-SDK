@@ -23,6 +23,10 @@
 add_subdirectory(miniply)
 add_subdirectory(tinyobjloader)
 
+# meshoptimizer configuration
+set(MESHOPT_INSTALL OFF CACHE BOOL "" FORCE)
+add_subdirectory(meshoptimizer)
+
 if ( DGF_BUILD_SAMPLES )
     add_subdirectory(d3d)
     add_subdirectory(imgui) # exclude imgui unless building samples
@@ -36,6 +40,7 @@ endif()
 
 set_target_properties(miniply PROPERTIES FOLDER "external")
 set_target_properties(tinyobj PROPERTIES FOLDER "external")
+set_target_properties(meshoptimizer PROPERTIES FOLDER "external")
 
 if ( DGF_BUILD_SAMPLES )
     set_target_properties(imgui PROPERTIES FOLDER "external")    # exclude imgui unless building samples
@@ -53,3 +58,4 @@ endif()
 
 set_target_properties(miniply PROPERTIES EXCLUDE_FROM_ALL 1)
 set_target_properties(tinyobj PROPERTIES EXCLUDE_FROM_ALL 1)
+set_target_properties(meshoptimizer PROPERTIES EXCLUDE_FROM_ALL 1)

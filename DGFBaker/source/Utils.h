@@ -209,34 +209,23 @@ namespace DGFBaker
     struct PerformanceData
     {
         std::chrono::nanoseconds Clustering            = std::chrono::nanoseconds(0);
-        std::chrono::nanoseconds QuantizeVertices      = std::chrono::nanoseconds(0);
-
-        std::chrono::nanoseconds PackTriangles = std::chrono::nanoseconds(0);
-        std::chrono::nanoseconds PickBestCandidate = std::chrono::nanoseconds(0);
-        
-        std::chrono::nanoseconds TryPack = std::chrono::nanoseconds(0);
-        std::chrono::nanoseconds TryPackMaterialIds    = std::chrono::nanoseconds(0);
-        std::chrono::nanoseconds GenerateStrips = std::chrono::nanoseconds(0);
-
-        std::chrono::nanoseconds BuildClusterGraph = std::chrono::nanoseconds(0);
-        std::chrono::nanoseconds BuildBlocks = std::chrono::nanoseconds(0);
-
-        std::chrono::nanoseconds AddTriangle = std::chrono::nanoseconds(0);
-        std::chrono::nanoseconds ExportBlock = std::chrono::nanoseconds(0);
-        
-        std::chrono::nanoseconds SplitBlock = std::chrono::nanoseconds(0);
-
-
-        std::chrono::nanoseconds EncodeBlocks          = std::chrono::nanoseconds(0);
-        std::chrono::nanoseconds GenerateVertexTable   = std::chrono::nanoseconds(0);
-
-        std::chrono::nanoseconds TotalTime;           
-        size_t NumBlocks = 0;
-
-    
+        std::chrono::nanoseconds ExponentSelect        = std::chrono::nanoseconds(0);
+        std::chrono::nanoseconds TrianglePacking       = std::chrono::nanoseconds(0);
+        std::chrono::nanoseconds Cleanup               = std::chrono::nanoseconds(0);
+        std::chrono::nanoseconds TotalTime;               
     };
 
     // bit manipulation
+
+    constexpr inline size_t RoundUpPow2(size_t n, size_t m)
+    {
+        return (n + (m - 1)) & ~(m - 1);
+    }
+
+    inline constexpr size_t BitSizeToByteSize(size_t n)
+    {
+        return RoundUpPow2(n, 8) / 8;
+    }
 
     inline constexpr size_t BitsNeededSigned(int32_t v)
     {
@@ -247,51 +236,20 @@ namespace DGFBaker
         size_t lz = 32 - std::countl_zero(bits);
         return 1 + lz;
     }
-    inline constexpr size_t BitsNeededUnsigned(uint32_t bits)
+    template< class TInt >
+    inline constexpr size_t BitsNeededUnsigned(TInt bits)
     {
-        size_t lz = 32 - std::countl_zero(bits);
+        typedef typename std::make_unsigned<TInt>::type TUnsigned;
+        size_t lz = (8*sizeof(TInt)) - std::countl_zero((TUnsigned)bits);
         return lz;
-    }
+    }    
 
-    inline constexpr size_t ReadBits(const uint8_t* bytes, size_t start, size_t len)
+    template< class TInt >
+    inline constexpr size_t BytesNeededUnsigned(TInt bits)
     {
-        DGF_ASSERT(len <= 48);
-
-        size_t firstByte = (start) / 8;
-        size_t lastByte = (start + (len - 1)) / 8;
-        size_t numBytes = 1 + lastByte - firstByte;
-
-        uint64_t dst = 0;
-        for (size_t i = 0; i < numBytes; i++)
-        {
-            uint64_t currByte = bytes[firstByte + i];
-            dst |= (currByte << (8 * i));
-        }
-
-        return (dst >> (start % 8)) & ((1ull << len) - 1);
+        size_t bitSize = BitsNeededUnsigned(bits);
+        return RoundUpPow2(bitSize, 8) / 8;
     }
-
-    inline constexpr void WriteBits(uint8_t* bytes, size_t start, size_t len, size_t value)
-    {
-        DGF_ASSERT(len <= 48);
-
-        uint64_t mask = ((1ull << len) - 1);
-        size_t offset = start % 8;
-        value = value << offset;
-        mask = mask << offset;
-
-        bytes += (start / 8);
-        while (mask)
-        {
-            size_t currByte = *bytes;
-            currByte = (currByte & ~mask) | (value & mask);
-            *bytes = (uint8_t)currByte;
-            mask = mask >> 8;
-            value = value >> 8;
-            bytes++;
-        }
-    }
-
 
     template< class TData, int MAX_N, class TKeyFunc >
     inline void RadixSort(TData* data, size_t n, size_t maxKey, TKeyFunc key)
@@ -334,5 +292,165 @@ namespace DGFBaker
         }
     }
 
+    template<typename S>
+    inline typename std::make_unsigned<S>::type ZigZagEncode(S s)
+    {
+        static_assert(std::is_signed<S>::value, "Type must be signed");
+        using U = typename std::make_unsigned<S>::type;
 
+        const auto u2 = static_cast<U>(s) << 1;
+        const auto n = static_cast<U>(s >> (std::numeric_limits<U>::digits - 1));
+        return u2 ^ n;
+    }
+
+    template<typename U>
+    inline typename std::make_signed<U>::type ZigZagDecode(U u)
+    {
+        static_assert(std::is_unsigned<U>::value, "Type must be unsigned");
+        using S = typename std::make_signed<U>::type;
+
+        const auto a = static_cast<S>(u >> 1);
+        const auto n = static_cast<S>(u & 1);
+        return a ^ (-n);
+    }
+
+#ifndef DGFBaker_CHECKED_TRUNCATION
+#ifdef _DEBUG
+#define DGFBaker_CHECKED_TRUNCATION
+#endif
+#endif
+
+    template< class TTo>
+    inline TTo uint_truncate(size_t src)
+    {
+        static_assert(std::is_unsigned<TTo>::value);
+#ifdef DGFBaker_CHECKED_TRUNCATION
+        DGF_ASSERT(src <= std::numeric_limits<TTo>::max());
+#endif
+        return static_cast<TTo>(src);
+    }
+
+#ifndef DGFBaker_CHECKED_BYTE_SPANS
+#ifdef _DEBUG
+#define DGFBaker_CHECKED_BYTE_SPANS
+#endif
+#endif
+
+#ifdef DGFBaker_CHECKED_BYTE_SPANS
+    
+    typedef std::span<uint8_t> ByteSpan;
+    typedef std::span<const uint8_t> ConstByteSpan;
+
+    inline ByteSpan MakeByteSpan(uint8_t* buffer, size_t size)
+    {
+        return ByteSpan(buffer, size);
+    }
+    inline ConstByteSpan MakeByteSpan(const uint8_t* buffer, size_t size)
+    {
+        return ConstByteSpan(buffer, size);
+    }
+    inline bool IsByteSpanEmpty(ConstByteSpan span)
+    {
+        return span.size() == 0;
+    }   
+    template<class T> T* ByteSpanCast(ByteSpan span, size_t offset=0, size_t arraySize=1)
+    {
+        DGF_ASSERT(offset + sizeof(T)*arraySize < span.size());
+        return reinterpret_cast<T*>(span.data() + offset);
+    }
+    template<class T> const T* ByteSpanCast(ConstByteSpan span, size_t offset=0, size_t arraySize = 1)
+    {
+        DGF_ASSERT(offset + sizeof(T) * arraySize < span.size());
+        return reinterpret_cast<const T*>(span.data() + offset);
+    }
+    inline ByteSpan IncrementByteSpan(ByteSpan span, size_t incr)
+    {
+        return span.subspan(incr, span.size() - incr);
+    }
+    inline ConstByteSpan IncrementByteSpan(ConstByteSpan span, size_t incr)
+    {
+        return span.subspan(incr, span.size() - incr);
+    }
+#else
+    typedef uint8_t* ByteSpan;
+    typedef const uint8_t* ConstByteSpan;
+    inline ByteSpan MakeByteSpan(uint8_t* buffer, size_t size)
+    {
+        return (size > 0) ? buffer : nullptr;
+    }
+    inline ConstByteSpan MakeByteSpan(const uint8_t* buffer, size_t size)
+    {
+        return (size > 0) ? buffer : nullptr;
+    }
+    inline bool IsByteSpanEmpty(ConstByteSpan span)
+    {
+        return span == nullptr;
+    }      
+    template<class T> T* ByteSpanCast(ByteSpan span, size_t offset = 0, size_t arraySize = 1)
+    {
+        return reinterpret_cast<T*>(span + offset);
+    }
+    template<class T> const T* ByteSpanCast(ConstByteSpan span, size_t offset = 0, size_t arraySize = 1)
+    {
+        return reinterpret_cast<const T*>(span + offset);
+    }
+    inline ByteSpan IncrementByteSpan(ByteSpan span, size_t incr)
+    {
+        return span + incr;
+    }
+    inline ConstByteSpan IncrementByteSpan(ConstByteSpan span, size_t incr)
+    {
+        return span + incr;
+    }
+#endif
+
+    inline bool ReadBit(const ConstByteSpan stream, size_t index)
+    {
+        return (stream[index / 8] >> (index % 8)) & 1;
+    }
+
+    inline uint64_t ReadBits(const ConstByteSpan bytes, size_t start, size_t len)
+    {
+        DGF_ASSERT(len <= 48);
+
+        size_t firstByte = (start) / 8;
+        size_t lastByte = (start + (len - 1)) / 8;
+        size_t numBytes = 1 + lastByte - firstByte;
+
+        uint64_t dst = 0;
+        for (size_t i = 0; i < numBytes; i++)
+        {
+            uint64_t currByte = bytes[firstByte + i];
+            dst |= (currByte << (8 * i));
+        }
+
+        return (dst >> (start % 8)) & ((1ull << len) - 1);
+    }
+
+    inline void WriteBits(ByteSpan bytes, size_t start, size_t len, uint64_t value)
+    {
+        DGF_ASSERT(len <= 48);
+
+        uint64_t mask = ((1ull << len) - 1);
+        size_t bitOffset = start % 8;
+        value = value << bitOffset;
+        mask  = mask << bitOffset;
+
+        size_t byteOffset = (start / 8);
+        while (mask)
+        {
+            size_t currByte = bytes[byteOffset];
+            currByte = (currByte & ~mask) | (value & mask);
+            bytes[byteOffset] = (uint8_t)currByte;
+            mask = mask >> 8;
+            value = value >> 8;
+            byteOffset++;
+        }
+    }
+
+    inline void WriteBit(ByteSpan bytes, size_t pos, size_t value)
+    {
+        uint8_t bit = (uint8_t)(value << (pos % 8));
+        bytes[pos / 8] |= bit;
+    }
 }

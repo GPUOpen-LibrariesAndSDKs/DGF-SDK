@@ -65,6 +65,6 @@ namespace DGFBaker
         bool userData 
     );
 
-    PackClusterResult PackClusterHPG24(uint32_t primIDBase, const PackClusterInputs& cluster, PerformanceData& perfData, const DGFBaker::Config& config);
+    PackClusterResult PackClusterHPG24(const PackClusterInputs& cluster, const DGFBaker::Config& config);
 
 }

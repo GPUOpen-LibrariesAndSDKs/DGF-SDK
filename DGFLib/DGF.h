@@ -32,6 +32,7 @@ namespace DGF
     constexpr size_t MAX_VERTS       = 64;
     constexpr size_t MAX_GEOM_IDS    = 32;
     constexpr size_t MAX_GEOMID_BITS = 24;
+    constexpr size_t MAX_PRIMID_BITS = 29;
     constexpr size_t VERTEX_BIT_ALIGNMENT = 4;
     constexpr size_t HEADER_SIZE    = 20;
 
@@ -55,11 +56,10 @@ namespace DGF
     constexpr size_t EXPONENT_MIN  = 1;
     constexpr size_t EXPONENT_MAX  = 232;
     
-    constexpr size_t MAX_GEOMID          = ((1 << MAX_GEOMID_BITS) - 1);
-    constexpr size_t MAX_CONSTANT_GEOMID = ((1 << 9) - 1);
-    constexpr size_t MAX_PRIMID          = ((1 << 29) - 1);
-
-    constexpr size_t MAX_OMM_DESCRIPTORS    = 7;
+    constexpr size_t MAX_GEOMID               = ((1 << MAX_GEOMID_BITS) - 1);
+    constexpr size_t MAX_CONSTANT_GEOMID      = ((1 << 9) - 1);
+    constexpr size_t MAX_PRIMID               = ((1 << MAX_PRIMID_BITS) - 1);
+    constexpr size_t MAX_OMM_DESCRIPTORS      = 7;
     constexpr size_t MAX_OMM_HOTPATCH_DWORDS  = 2 + MAX_OMM_DESCRIPTORS;
 
     constexpr size_t MAX_USERDATA_SIZE = 4;
@@ -118,6 +118,8 @@ namespace DGF
     size_t DecodeTriangleCount( const uint8_t* block );
     size_t DecodePrimIDBase( const uint8_t* block );
     size_t DecodeVertexCount( const uint8_t* block );
+    size_t DecodeOMMDescriptorCount( const uint8_t* block );
+    bool BlockHasUserData( const uint8_t* block );
 
     // Decodes triangle indices.. returns number of vertices
     size_t DecodeTriangleList(uint8_t* pIndexBuffer, const uint8_t* block);
@@ -140,6 +142,11 @@ namespace DGF
 
     // Decodes per-triangle geomIDs and opacity flags
     void DecodeGeomIDs(uint32_t* pIDs, uint8_t* pOpaqueFlags, const uint8_t* block);
+
+    // Decodes a geomID palette from a block.  Return value is the number of entries in the palette
+    //  The values returned in 'pEntries' will have the opaque flag in the LSB and the geomID in bits 25:1
+    //  For blocks which use 'Constant mode', a palette with a single entry is returned and the triangle indices are zero'd
+    size_t DecodeGeomIDPalette(uint32_t* pEntries, uint8_t* pTriangleIndices, const uint8_t* block);
 
     // Convert the block anchor to a floating-point vertex
     FloatVert DecodeAnchor(const MetaData& meta);

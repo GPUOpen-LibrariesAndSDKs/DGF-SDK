@@ -82,8 +82,7 @@ namespace DGFBaker
         const DGFBaker::TriangleAttributes* clusterAttributes,
         const DGFBaker::Config& config,
         ClusterAdjacencyGraph& clusterGraph,
-        const uint8_t* Indices,
-        PerformanceData& perfData)
+        const uint8_t* Indices)
     {
         // too many tris to fit in block?
         if (numTris > DGF::MAX_TRIS || numTris > config.blockMaxTris)
@@ -168,7 +167,7 @@ namespace DGFBaker
         uint32_t numGeomIDPayloads = 0;
         uint32_t geomIDPayloadDiffMask = 0;        
         int32_t ommDescriptors[DGF::MAX_OMM_DESCRIPTORS];
-        uint8_t triOMMIndices[DGF::MAX_INDICES];
+        uint8_t inputTriOMMIndices[DGF::MAX_TRIS];
         size_t numOMMDescriptors = 0;
         size_t numOMMIndices = 0;
 
@@ -219,7 +218,7 @@ namespace DGFBaker
                 }
 
                 // record per-triangle OMM indices
-                triOMMIndices[numOMMIndices++] = (uint8_t) descriptorIndex;
+                inputTriOMMIndices[numOMMIndices++] = (uint8_t) descriptorIndex;
             }
         }
 
@@ -237,9 +236,7 @@ namespace DGFBaker
         // build strips 
         DGFStripInfo strip;
         LocalTriangleRemap remap[DGF::MAX_TRIS];
-        {
-            Timer t;
-            
+        {            
             uint8_t triangleIndices[DGF::MAX_TRIS];
             for (size_t i = 0; i < numTris; i++)
                 triangleIndices[i] = sortKeys[i].idx;
@@ -247,7 +244,6 @@ namespace DGFBaker
             BlockAdjacencyGraph blockGraph;
             blockGraph.Build(clusterGraph, triangleIndices, numTris);
             GenerateStrips(strip, blockGraph, remap, blockLocalIndices, numTris);
-            perfData.GenerateStrips += t.Tick();
         }
 
         // does everything fit?
@@ -291,16 +287,17 @@ namespace DGFBaker
             }
         }
 
-        // Construct triangle geomID arrays in strip order, and re-number the indices in the 'Remap' structures
+        // Construct triangle attribute arrays in strip order, and re-number the indices in the 'Remap' structures
         uint32_t triangleGeomIDs[DGF::MAX_TRIS];
         uint8_t triangleOpaqueFlags[DGF::MAX_TRIS];
+        uint8_t triangleOMMIndices[DGF::MAX_TRIS];
         for (size_t i = 0; i < numTris; i++)
         {
             uint32_t triIndexInBlock   = remap[i].InputPrimID;
             uint32_t triIndexInCluster = sortKeys[triIndexInBlock].idx;
             triangleGeomIDs[i]     = clusterAttributes[triIndexInCluster].geomID;
             triangleOpaqueFlags[i] = clusterAttributes[triIndexInCluster].opaque;
-
+            triangleOMMIndices[i]  = inputTriOMMIndices[triIndexInBlock];
             remap[i].InputPrimID = triIndexInCluster;
         }
 
@@ -369,12 +366,11 @@ namespace DGFBaker
             input.yBits = (uint8_t)yBits;
             input.zBits = (uint8_t)zBits;
             input.numOMMDescriptors = (uint8_t) numOMMDescriptors;
-            input.triangleOMMDescriptorIndices = triOMMIndices;
+            input.triangleOMMDescriptorIndices = triangleOMMIndices;
             input.userDataSize = (uint8_t)userDataByteSize;
             input.roundTripValidation = config.encoderRoundTripValidation;
 
             DGF::Encode(dgfBlock, input);
-            perfData.EncodeBlocks += t.Tick();
         }
 
         packResult.dgfBlocks.insert(packResult.dgfBlocks.end(), &dgfBlock[0], &dgfBlock[DGF::BLOCK_SIZE]);
@@ -436,7 +432,7 @@ namespace DGFBaker
     }
 
 
-    static void SplitBlock(TempBlock& left, TempBlock& right, const SIMDBox* boxes, SortKeys* clusterKeys )
+    static void SplitBlock(TempBlock& left, TempBlock& right, const SIMDBox* boxes, SortKeys* clusterKeys, size_t sahBlockSize)
     {
         TempBlock input = left;
 
@@ -462,7 +458,8 @@ namespace DGFBaker
             {
                 size_t idx = keys[i].idx;
                 tmpBox.Expand(boxes[idx]);
-                leftCosts[i] = tmpBox.HalfArea() * (i + 1);
+                leftCosts[i] = tmpBox.HalfArea() * (float)ceil((i + 1) / sahBlockSize);
+                
             }
 
             // special case for degenerate geometry
@@ -482,7 +479,8 @@ namespace DGFBaker
             {
                 size_t j = (numTris - i) - 1;
 
-                float cost = leftCosts[j] + i * tmpBox.HalfArea();
+                float cost = leftCosts[j] + (float)ceil(i / sahBlockSize) * tmpBox.HalfArea();
+
                 if (cost < bestCost)
                 {
                     bestCost = cost;
@@ -528,11 +526,10 @@ namespace DGFBaker
 
 
     PackClusterResult PackClusterSAH(
-        uint32_t primIDBase, 
         const PackClusterInputs& cluster,
-        PerformanceData& perfData, 
         const DGFBaker::Config& config)
     {
+        uint32_t primIDBase = cluster.primIDBase;
         PackClusterResult ret;
 
         size_t clusterSize = cluster.numTris;
@@ -542,13 +539,9 @@ namespace DGFBaker
         SortKeys sortKeys[MAX_CLUSTER_TRIS];
         PreprocessTris(cluster, triBoxes, sortKeys);
 
-        ClusterAdjacencyGraph clusterGraph;
-        {
-            Timer t;
-            clusterGraph.Build(cluster.Indices, clusterSize);
-            perfData.BuildClusterGraph += t.Tick();
-        }
-
+        ClusterAdjacencyGraph clusterGraph;           
+        clusterGraph.Build(cluster.Indices, clusterSize);
+       
         std::vector<TempBlock> tmpBlocks;
         TempBlock tb;
         tb.exponent = cluster.exponent;
@@ -556,14 +549,8 @@ namespace DGFBaker
         tb.triCount = (uint16_t)clusterSize;
         tmpBlocks.push_back(tb);
 
-        std::vector<int3> verts;
-        {
-            Timer t;
-            verts.resize(cluster.numVerts);
-            QuantizeVerts(verts, cluster.Verts, cluster.exponent);
-            perfData.QuantizeVertices += t.Tick();
-        }
-
+        std::span<const int3> verts(cluster.QuantizedVerts,cluster.numVerts);
+        
         size_t i = 0;
         uint32_t numEncodedTris = 0;
         while (i < tmpBlocks.size())
@@ -572,7 +559,7 @@ namespace DGFBaker
             size_t numTris = tmpBlocks[i].triCount;
             SortKeys* keys = &sortKeys[tmpBlocks[i].firstTri];
 
-            if (BuildBlock(ret, primIDBase + numEncodedTris, exponent, numTris, keys, verts, cluster.Attributes, config, clusterGraph, cluster.Indices, perfData))
+            if (BuildBlock(ret, primIDBase + numEncodedTris, exponent, numTris, keys, verts, cluster.Attributes, config, clusterGraph, cluster.Indices))
             {
                 numEncodedTris += (uint32_t) numTris;
                 i++;
@@ -580,10 +567,8 @@ namespace DGFBaker
             }
             else
             {
-                Timer t;
                 tmpBlocks.emplace_back();
-                SplitBlock(tmpBlocks[i], tmpBlocks.back(), triBoxes, sortKeys );
-                perfData.SplitBlock += t.Tick();
+                SplitBlock(tmpBlocks[i], tmpBlocks.back(), triBoxes, sortKeys, config.sahBlockSize);
             }
         }
 

@@ -81,9 +81,18 @@ foreach(SHADER ${ALL_SHADERS})
 endforeach()
 
 set_property(TARGET ${APP_NAME} PROPERTY CXX_STANDARD 20)
+#add_custom_command(
+#    TARGET ${APP_NAME}
+#    COMMAND ${CMAKE_COMMAND} -E tar xzf "${CMAKE_CURRENT_SOURCE_DIR}/data/wood-doll.obj.tgz"
+#    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/data/"        
+#    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/data/wood-doll.obj.tgz"
+#)
+
+
 add_custom_command(
     TARGET ${APP_NAME}
-    COMMAND ${CMAKE_COMMAND} -E tar xzf "${CMAKE_CURRENT_SOURCE_DIR}/data/wood-doll.obj.tgz"
-    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/data/"        
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/data/wood-doll.obj.tgz"
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E tar xzf "${CMAKE_CURRENT_SOURCE_DIR}/data/wood-doll.obj.tgz"    
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/data/"    
+    VERBATIM
 )

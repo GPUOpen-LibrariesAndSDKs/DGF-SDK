@@ -32,7 +32,7 @@ namespace DGFBaker
     {
         std::chrono::duration<double> totalTime = std::chrono::duration<double>(perfData.TotalTime);
 
-        str << perfData.NumBlocks << " DGF blocks in " << totalTime << std::endl;
+        str << "Packed in " << totalTime << std::endl;
 
         auto PrintTiming = [&](const std::string& label, const auto time) {
             auto timed = std::chrono::duration<double>(time);
@@ -45,34 +45,22 @@ namespace DGFBaker
         };
 
         PrintTiming("Clustering",                perfData.Clustering);
-        std::chrono::nanoseconds packerTime = std::chrono::nanoseconds(0);
+        PrintTiming("ExponentSelect", perfData.ExponentSelect);
         if (config.packer == DGFBaker::PackerMode::HPG24)
         {
-            PrintTiming("PackBlocksHPG24", perfData.PackTriangles);
-            PrintTiming("| QuantizeVertices", perfData.QuantizeVertices);
-            PrintTiming("| BuildBlocks", perfData.BuildBlocks);
-            PrintTiming("| | AddTriangle", perfData.AddTriangle);
-            PrintTiming("| | ExportBlock", perfData.ExportBlock);
-            PrintTiming("| EncodeBlocks", perfData.EncodeBlocks);           
+            PrintTiming("PackBlocksHPG24", perfData.TrianglePacking);
         }
         else
         {
-            PrintTiming("PackBlocksSAH",       perfData.PackTriangles);            
-            PrintTiming("| BuildClusterGraph", perfData.BuildClusterGraph);
-            PrintTiming("| QuantizeVertices",  perfData.QuantizeVertices);
-            PrintTiming("| GenerateStrips",    perfData.GenerateStrips);
-            PrintTiming("| SplitBlock",        perfData.SplitBlock);
-            PrintTiming("| EncodeBlocks",      perfData.EncodeBlocks);
-
-            auto other = perfData.BuildClusterGraph + perfData.QuantizeVertices + perfData.GenerateStrips + perfData.SplitBlock + perfData.EncodeBlocks;
-            PrintTiming("| Other", perfData.PackTriangles - other );
+            PrintTiming("PackBlocksSAH",       perfData.TrianglePacking);
         }
  
-        PrintTiming("GenerateVertexTable",       perfData.GenerateVertexTable);
+        PrintTiming("Cleanup",       perfData.Cleanup);
 
         auto categorizedTime = perfData.Clustering +
-            perfData.PackTriangles +
-            perfData.GenerateVertexTable;
+            perfData.TrianglePacking +
+            perfData.ExponentSelect +
+            perfData.Cleanup;
 
         PrintTiming("Other",                     perfData.TotalTime - categorizedTime);
 

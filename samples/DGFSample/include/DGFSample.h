@@ -56,7 +56,8 @@ private:
         DGFBaker::Config                  bakerConfig         = {.validateClusters      = true,
                                                                  .generateVertexTable   = true,
                                                                  .generateTriangleRemap = true,
-                                                                 .enableUserData        = true};
+                                                                 .enableUserData        = true,
+                                                                 .allowInternalThreading = true};
 
         DisplayMode displayMode = DisplayMode::Meshlets;
         bool        useNativeDGF = false;
@@ -108,11 +109,14 @@ private:
 
     DGFBVHBuilder m_dgfBvhBuilder;
     
-    ComPtr<api::Texture> m_zbuffer;
-    ComPtr<api::Texture> m_raytracingBackBuffer;
-    ComPtr<api::Buffer>  m_asScratchResource;
-    ComPtr<api::RTAS>    m_blas;
-    ComPtr<api::RTAS>    m_tlas;
+    ComPtr<api::Texture>    m_zbuffer;
+    ComPtr<api::Texture>    m_raytracingBackBuffer;
+    ComPtr<api::Buffer>     m_asScratchResource;
+    ComPtr<api::RTASBuffer> m_rtasBuffer;
+    ComPtr<api::RTAS>       m_blas;
+    ComPtr<api::RTAS>       m_tlas;
+    size_t                  m_blasOffset = 0;
+    size_t                  m_tlasOffset = 0;
     ComPtr<api::Buffer>  m_rtasDecodeBuffer;
     ComPtr<api::Buffer>  m_instanceDescBuffer;
     ComPtr<api::Buffer>  m_rasterConstantBuffer;

@@ -35,6 +35,22 @@
 #include <array>
 
 
+#define STRING(x) #x
+#define TOSTRING(x) STRING(x)
+#define PING std::cout << __FILE__ << " (" << __LINE__ << "): " << __FUNCTION__ << std::endl
+#define PRINT(x) std::cout << STRING(x) << " = " << (x) << std::endl
+#define PRINT2(x,y) std::cout << STRING(x) << " = " << (x) << ", " << STRING(y) << " = " << (y) << std::endl
+#define PRINT3(x,y,z) std::cout << STRING(x) << " = " << (x) << ", " << STRING(y) << " = " << (y) << ", " << STRING(z) << " = " << (z) << std::endl
+#define PRINT4(x,y,z,w) std::cout << STRING(x) << " = " << (x) << ", " << STRING(y) << " = " << (y) << ", " << STRING(z) << " = " << (z) << ", " << STRING(w) << " = " << (w) << std::endl
+#define PRINT5(x,y,z,w,a) std::cout << STRING(x) << " = " << (x) << ", " << STRING(y) << " = " << (y) << ", " << STRING(z) << " = " << (z) << ", " << STRING(w) << " = " << (w) << ", " << STRING(a) << " = " << (a) << std::endl
+#define PRINT6(x,y,z,w,a,b) std::cout << STRING(x) << " = " << (x) << ", " << STRING(y) << " = " << (y) << ", " << STRING(z) << " = " << (z) << ", " << STRING(w) << " = " << (w) << ", " << STRING(a) << " = " << (a) << ", " << STRING(b) << " = " << (b) << std::endl
+
+#define UPRINT(x) std::cout << STRING(x) << " = " << (x) << std::endl
+#define UPRINT2(x,y) std::cout << STRING(x) << " = " << (x) << ", " << STRING(y) << " = " << (y) << std::endl
+#define UPRINT3(x,y,z) std::cout << STRING(x) << " = " << (x) << ", " << STRING(y) << " = " << (y) << ", " << STRING(z) << " = " << (z) << std::endl
+#define UPRINT4(x,y,z,w) std::cout << STRING(x) << " = " << (x) << ", " << STRING(y) << " = " << (y) << ", " << STRING(z) << " = " << (z) << ", " << STRING(w) << " = " << (w) << std::endl
+#define UPRINT5(x,y,z,w,a) std::cout << STRING(x) << " = " << (x) << ", " << STRING(y) << " = " << (y) << ", " << STRING(z) << " = " << (z) << ", " << STRING(w) << " = " << (w) << ", " << STRING(a) << " = " << (a) << std::endl
+#define UPRINT6(x,y,z,w,a,b) std::cout << STRING(x) << " = " << (x) << ", " << STRING(y) << " = " << (y) << ", " << STRING(z) << " = " << (z) << ", " << STRING(w) << " = " << (w) << ", " << STRING(a) << " = " << (a) << ", " << STRING(b) << " = " << (b) << std::endl
 
 #define THROW_RUNTIME_ERROR(x){ \
     throw std::runtime_error(x);\
@@ -44,6 +60,11 @@
     if(!(cond))\
         throw std::runtime_error(#cond);\
 }
+
+#define FATAL(x)   THROW_RUNTIME_ERROR(x)
+#define WARNING(x) { std::cerr << "Warning: " << x << std::endl << std::flush; }
+
+#define NOT_IMPLEMENTED FATAL(std::string(__FUNCTION__) + " not implemented")
 
 typedef unsigned int uint;
 
@@ -60,6 +81,17 @@ struct float3 {
     {
         return {x - rhs.x, y - rhs.y, z - rhs.z};
     }
+
+    inline float3 operator*(const float3& rhs) const
+    {
+        return { x * rhs.x, y * rhs.y, z * rhs.z };
+    }
+
+    inline float3 operator/(const float3& rhs) const
+    {
+        return { x / rhs.x, y / rhs.y, z / rhs.z };
+    }
+
     inline float3 operator*(const float s) const
     {
         return {x * s, y * s, z * s};
@@ -77,9 +109,23 @@ struct float3 {
 
     float3(float xx, float yy, float zz) : x(xx), y(yy), z(zz) {}
 
+    float3(float v) : x(v), y(v), z(v) {}
+
     bool operator==(const float3& other) const
     {
         return x == other.x && y == other.y && z == other.z;
+    }
+
+    __forceinline static const float3 min(const float3& a, const float3& b) {
+        return float3(std::min(a.x,b.x), std::min(a.y, b.y), std::min(a.z, b.z));
+    }
+
+    __forceinline static const float3 max(const float3& a, const float3& b) {
+        return float3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, const float3& v) {
+        return os << "(" << v.x << "," << v.y << "," << v.z << ")";
     }
 };
 
@@ -103,6 +149,73 @@ inline float3 normalize(float3 v)
 inline float3 cross(float3 a, float3 b)
 {
     return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+inline float dot(float3 a, float3 b)
+{
+    return a.x * b.x + a.y * b.y + a.z * b.z; ;
+}
+
+
+struct float2 {
+    float x;
+    float y;
+
+    inline float2 operator+(const float2& rhs) const
+    {
+        return { x + rhs.x, y + rhs.y};
+    }
+    inline float2 operator-(const float2& rhs) const
+    {
+        return { x - rhs.x, y - rhs.y};
+    }
+
+    inline float2 operator*(const float2& rhs) const
+    {
+        return { x * rhs.x, y * rhs.y};
+    }
+
+    inline float2 operator/(const float2& rhs) const
+    {
+        return { x / rhs.x, y / rhs.y};
+    }
+
+    inline float2 operator*(const float s) const
+    {
+        return { x * s, y * s};
+    }
+
+    inline float2 operator+=(const float2& rhs)
+    {
+        x += rhs.x;
+        y += rhs.y;
+        return *this;
+    }
+
+    float2() : x(0), y(0) {};
+
+    float2(float xx, float yy) : x(xx), y(yy) {}
+
+    float2(float v) : x(v), y(v) {}
+
+    bool operator==(const float2& other) const
+    {
+        return x == other.x && y == other.y;
+    }
+
+    __forceinline static const float2 min(const float2& a, const float2& b) {
+        return float2(std::min(a.x, b.x), std::min(a.y, b.y));
+    }
+
+    __forceinline static const float2 max(const float2& a, const float2& b) {
+        return float2(std::max(a.x, b.x), std::max(a.y, b.y));
+    }
+
+};
+
+__forceinline float dot(float2 a, float2 b)
+{
+    return a.x * b.x + a.y * b.y;
 }
 
 struct float4 {
@@ -189,12 +302,38 @@ struct float4x4 {
         m11                         = c;
     }
 
-    const float& operator()(int row, int col) const
+    void SetScale(float x, float y, float z)
+    {
+        SetIdentity();
+        m00 = x;
+        m11 = y;
+        m22 = z;
+    }
+
+    void SetRotationFromQuaternion(float w, float x, float y, float z)
+    {
+        SetIdentity();
+
+        d[0] = 1 - 2 * (y * y + z * z);
+        d[1] = 2 * (x * y + z * w);
+        d[2] = 2 * (x * z - y * w);
+
+        d[4] = 2 * (x * y - z * w);
+        d[5] = 1 - 2 * (x * x + z * z);
+        d[6] = 2 * (y * z + x * w);
+
+        d[8] = 2 * (x * z + y * w);
+        d[9] = 2 * (y * z - x * w);
+        d[10] = 1 - 2 * (x * x + y * y);
+
+    }
+
+    const float& operator()(const size_t row, const size_t col) const
     {
         return d[col * 4 + row];
     }
 
-    float& operator()(int row, int col)
+    float& operator()(const size_t row, const size_t col)
     {
         return d[col * 4 + row];
     }
@@ -292,6 +431,8 @@ public:
     size_t GetNumBlockVertices() const;
     size_t GetNumBlockTriangles() const;
 
+    api::DGFBLASDesc GetDGFBLASDesc() const;
+
 private:
     void LoadBinary(const std::filesystem::path pathToFile);
     void CreateReferenceMesh();
@@ -325,7 +466,7 @@ private:
 Mesh ParsePlyFile(const std::filesystem::path inputFile);
 Mesh ParseObjFile(const std::filesystem::path inputFile, bool discardMaterials);
 
-std::wstring OpenFileDialog();
+std::wstring OpenFileDialog( const wchar_t* fileType = L"Mesh Files", const wchar_t* fileExtensions = L"*.ply;*.obj");
 
 DGFBaker::BakerMesh CreateDGFBakerMesh(const Mesh& mesh);
 
@@ -458,29 +599,40 @@ int3   min(const int3& a, const int3& b);
 int3   max(const int3& a, const int3& b);
 
 
+//float2 min(const float2& a, const float2& b);
+//float2 max(const float2& a, const float2& b);
+
+
 std::wstring OpenDirectoryDialog();
 
 struct AABB {
     float3 Min;
     float3 Max;
-    AABB()
+
+    void Init()
     {
         constexpr float inf = std::numeric_limits<float>::infinity();
         Min = { inf, inf, inf };
         Max = { -inf, -inf, -inf };
+    }
+
+    AABB()
+    {
+        Init();
     };
-    AABB(float3 min, float3 max) : Min(min), Max(max) {}
+
+    AABB(const float3 &min, const float3 &max) : Min(min), Max(max) {}
 
     AABB(const AABB& rhs) = default;
     AABB& operator=(const AABB& rhs) = default;
 
-    void Expand(float3 pt)
+    void Expand(const float3 &pt)
     {
         Min = min(pt, Min);
         Max = max(pt, Max);
     }
 
-    void Expand(AABB box)
+    void Expand(const AABB &box)
     {
         Min = min(box.Min, Min);
         Max = max(box.Max, Max);
@@ -492,20 +644,163 @@ struct AABB {
         return d.x * (d.y + d.z) + d.y * d.z;
     }
 
-    bool Contains(AABB box) const
+    bool Contains(const AABB &box) const
     {
         return Min.x <= box.Min.x && Min.y <= box.Min.y && Min.z <= box.Min.z && Max.x >= box.Max.x &&
             Max.y >= box.Max.y && Max.z >= box.Max.z;
     }
+
+    float3 Diagonal() const
+    {
+        return Max - Min;
+    }
+
 
     float LongEdgeLength() const
     {
         float3 d = Max - Min;
         return std::max(d.x, std::max(d.y, d.z));
     }
+
+    float3 Centroid() const
+    {
+        return (Max + Min) * 0.5f;
+    }
+
+    float SurfaceArea() const
+    {
+        const float3 d = Diagonal();
+        return 2.0f * (d.x * d.y + d.x * d.z + d.y * d.z);
+    }
+
+    bool IsValid() const
+    {
+        return (Min.x <= Max.x) && (Min.y <= Max.y) && (Min.z <= Max.z);
+    }
+
+    float maxDiagDim() const
+    {
+        const float3 d = Diagonal();
+        return std::max(std::max(d.x, d.y), d.z);
+    }
+
+    __forceinline friend std::ostream& operator<<(std::ostream& os, const AABB& p);
+
+
+    __forceinline static const AABB Intersect(const AABB& a, const AABB& b) {
+        float3 lower(max(a.Min, b.Min));
+        float3 upper(min(a.Max, b.Max));
+        return AABB(lower, upper);
+    }
+
 };
+
+__forceinline std::ostream& operator<<(std::ostream& os, const AABB& b) {
+    os << "[" << b.Min.x << ", " << b.Min.y << "," << b.Min.z << "] - ";
+    os << "[" << b.Max.x << ", " << b.Max.y << "," << b.Max.z << "]";
+    return os;
+}
+
+struct AABB2f
+{
+    float2 Min;
+    float2 Max;
+
+    void Init()
+    {
+        Max = float2(-FLT_MAX, -FLT_MAX);
+        Min = float2(FLT_MAX, FLT_MAX);
+    }
+
+    AABB2f()
+    {
+        Init();
+    }
+
+    AABB2f(const float2& lower, const float2& upper) : Min(lower), Max(upper)
+    {
+    }
+
+    bool IsValid() const
+    {
+        return (Min.x <= Max.x) && (Min.y <= Max.y);
+    }
+
+    void Union(float2 p)
+    {
+        Min.x = std::min(Min.x, p.x);
+        Min.y = std::min(Min.y, p.y);
+        Max.x = std::max(Max.x, p.x);
+        Max.y = std::max(Max.y, p.y);
+    }
+
+    void Extend(float2 p)
+    {
+        Union(p);
+    }
+
+    void Union(AABB2f b)
+    {
+        Union(b.Min);
+        Union(b.Max);
+    }
+
+    void Extend(AABB2f b)
+    {
+        Union(b);
+    }
+
+    float2 Diagonal() const
+    {
+        return Max - Min;
+    }
+
+    float MaxDiagDim() const
+    {
+        const float2 d = Diagonal();
+        return std::max(d.x, d.y);
+    }
+
+    float2 Centroid() const
+    {
+        return (Max + Min) * 0.5f;
+    }
+
+    float2 Centroid2() const
+    {
+        return Max + Min;
+    }
+
+    float SurfaceArea() const
+    {
+        const float2 d = Diagonal();
+        return d.x * d.y;
+    }
+
+    __forceinline static const AABB2f Intersect(const AABB2f& a, const AABB2f& b) {
+        float2 lower(float2::max(a.Min, b.Min));
+        float2 upper(float2::min(a.Max, b.Max));
+        return AABB2f(lower, upper);
+    }
+    __forceinline friend std::ostream& operator<<(std::ostream& os, const AABB2f& p);
+
+};
+
+__forceinline std::ostream& operator<<(std::ostream& os, const AABB2f& b) {
+    os << "[" << b.Min.x << ", " << b.Min.y << "] - ";
+    os << "[" << b.Max.x << ", " << b.Max.y << "]";
+    return os;
+}
+
+
 
 std::wstring GetExecutablePath();
 
 
 std::string wstring_to_string(const std::wstring& wstr);
+
+
+constexpr inline size_t RoundUpPow2(size_t n, size_t m)
+{
+    return (n + (m - 1)) & ~(m - 1);
+}

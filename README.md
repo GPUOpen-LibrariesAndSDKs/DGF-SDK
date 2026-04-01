@@ -7,8 +7,32 @@ This repository contains our DGF encoding toolchain.  The directory structure is
 * **DGFLib**:  A library containing the low-level encoder/decoder for DGF blocks
 * **DGFBaker**: A library which implements a DGF content baking pipeline
 * **DGFTester**: A command-line test harness
-* **DGFSample**: A simple D3D12/Vulkan viewer for DGF models, which demonstrates real-time decoding in HLSL shaders. 
-* **DGFAnimationSample**: A D3D12/Vulkan application demonstrating on the fly DGF block assembly for animated content.
+* **external**: Embedded third-party libraries
+* **samples**
+  * **DGFSample**: A simple D3D12/Vulkan viewer for DGF models, which demonstrates real-time decoding in HLSL shaders. 
+  * **DGFAnimationSample**: A D3D12/Vulkan application demonstrating on the fly DGF block assembly for animated content.
+  * **SampleFramework**: Simple rendering framework used by the samples
+  * **DGFMeshOptimizerSample**: Demonstrates how to use the preclustered input path using [meshoptimizer](https://github.com/zeux/meshoptimizer) clustering.
+  
+Contents:
+
+- [Building the SDK](#building-the-sdk)
+- [Running the Real-Time Samples](#running-the-real-time-samples)
+- [Using the SDK](#using-the-sdk)
+    - [Using DGFLib](#using-dgflib)
+        - [DGF_ASSERT](#dgf_assert)  
+    - [Using DGFBaker](#using-dgfbaker)
+        - [Clustering Without Compression](#clustering-without-compression)
+        - [Compressing Pre-clustered Geometry](#compressing-pre-clustered-geometry)
+        - [Baker Configuration](#baker-configuration)
+        - [Animation-Aware Compression](#animation-aware-compression)
+        - [Decoding](#decoding)
+        - [Validation](#validation)
+        - [Triangle Sideband Data](#triangle-sideband-data)
+        - [Vertex Sideband Data](#vertex-sideband-data)
+        - [DGF SuperCompression](#dgf-supercompression)
+    - [Using DGFTester](#using-dgftester)
+- [Decoding DGF in HLSL](#decoding-dgf-in-hlsl) 
  
 # Building the SDK
 
@@ -38,6 +62,8 @@ add_subdirectory ( ${PATH_TO_DGFSDK} );
 The Real-Time samples (DGFSample and DGFAnimationSample) should build and run in your IDE out of the box, and support both Vulkan and D3D12.  D3D12 is used by default.  To run the samples under Vulkan, add --vulkan to the command line.
 When run in Vulkan, the samples will leverage the [Vulkan extension](https://gpuopen.com/learn/dense-geometry-format-amd-vulkan-extension/) where available.
 
+# Using the SDK
+
 ## Using DGFLib
 
 The `DGFLib` is a single header/CPP pair which contains functions for manipulating DGF blocks.  
@@ -52,7 +78,7 @@ The following example illustrates how to use DGFLib to decode a DGF block:
     // unpack the triangle strip
     DGF::TriControlValues controlValues[DGF::MAX_TRIS];
     uint8_t stripIndexBuffer[DGF::MAX_INDICES];
-    DecodeTopology(controlValues, indexBuffer, block);
+    DecodeTopology(controlValues, stripIndexBuffer, block);
     
     // convert the triangle strip to a triangle list
     uint8_t triangleList[DGF::MAX_INDICES];
@@ -154,10 +180,12 @@ std::vector<uint8_t> StridedMeshExample(
     };
   
     DGFBaker::BakerMesh mesh( _VertexReader, _IndexReader, numVerts, numTris );
+    DGFBaker::Baker baker;
     DGFBaker::BakerOutput output = baker.BakeDGF(mesh);    
     return std::move(output.dgfBlocks);
 }
 ```
+
 ### Clustering Without Compression
 
 The first stage of a DGF compression pipeline is to arrange the triangles into SAH-efficient clusters.  The `DGFBaker` class provides a method which allows the cluster builder to be accessed without going all the way to DGF blocks.  The signature is:
@@ -185,6 +213,7 @@ The `DGFBaker` class also supports applying DGF compression to pre-clustered inp
 void ClusteredMeshExample( std::vector<MyCluster>& myClusters )
 {
     DGFBaker::ClusteredMesh mesh(
+       myClusters.size(),
        GetVertexReader(myClusters),
        GetIndexReader(myClusters),
        GetAttributeReader(myClusters) );
@@ -227,6 +256,7 @@ void PreclusteredMeshExample( DGFBaker::Baker& baker, DGFBaker::BakerMesh& mesh 
     // use 'output'
 }
 ```
+The DGFMeshOptimizer sample demonstrates how to create DGF blocks using [meshoptimizer](https://github.com/zeux/meshoptimizer) for clustering.
 
 
 ### Baker Configuration
@@ -264,6 +294,12 @@ struct Config
 
         bool enableExponentAdjust  = true;    
         bool weldVertices = false; 
+
+        bool allowInternalThreading = false;
+
+        bool postQuantizationWelding = false;
+
+        size_t sahBlockSize = 1;
 };
     
 ```
@@ -293,6 +329,9 @@ The algorithms used in DGFBaker are described in the [HPG 2024 Paper](https://gp
 | quantizationExponent | Fixed exponent to use if `QuantizationMode` is set to `EXPLICIT_EXPONENT` |
 | enableExponentAdjust | Allows the baker to adjust the block exponents to eliminate trailing zero bits.  This can significantly improves the compression rate for pre-quantized input. |
 | weldVertices | Allow the encoder to merge input vertices with identical positions but different indices. When this option is enabled, the block-level connectivity cannot be used as an implicit index buffer. |
+| allowInternalThreading | Allow the use of internal multi-threading using STL parallel algorithms |
+| postQuantizationWelding | Allow the encoder to merge input vertices with differing positions, which quantize to the position |
+| sahBlockSize | Biases the clustering and block packing algorithms, to favor triangle sets whose size is a multiple of this value |
 
 The supported packer modes are:
 
@@ -469,6 +508,64 @@ The table below shows the measured memory overheads for several of the options, 
 | 24	             | 1.84	                  | 3.69	             | 3.34               |	6.68	            |  13.36		      |
 
 
+### DGF SuperCompression
+
+DGF SuperCompression (DGFS) is a complementary technology to DGF, which is designed to further compress DGF data for efficient disk storage.  
+
+DGFS provides the following benefits to applications:
+ * Up to 22% reduction in disk storage, compared to compressing DGF blocks directly.
+ * The ability to quickly decode to an uncompressed meshlet on legacy hardware, with no additional storage.
+
+The DGFS encoder and decoder are provided in the DGFBaker library, but reside in a separate namespace.
+ 
+The following code snippet demonstrates how to encode a mesh to DGF, and then apply super-compression:
+
+ ```C
+DGFBaker::BakerMesh mesh = {..}; // create a BakerMesh for the geometry
+DGFBaker::Baker baker;
+DGFBaker::BakerOutput bakerOutput = baker.BakeDGF(mesh);
+
+DGFS::Encoder::Config encoderConfig;
+DGFS::Encoder encoder(encoderConfig);
+
+std::vector< std::vector<uint8_t> > dgfsClusters = encoder.EncodeClusters(bakerOutput);
+```
+
+DGFS compresses individual mesh clusters, so the return value from the encoder is an array of byte streams, one stream for each cluster.
+It is the application's responsibility to store the byte streams.  They can simply be concatenated together and written to disk, or they could be interleaved with other data such as vertex attributes.
+
+DGFS provides two decoder implementations: `MeshletDecoder`, which decodes to a vertex and index buffer, and `DGFDecoder` which decodes to an array of DGF blocks.
+Both decoders follow a similar usage pattern, so we will use the `MeshletDecoder` for illustration:
+
+The first step is to interrogate the DGFS stream to determine the amount of memory required:
+
+```C
+DGFS::MeshletDecoder decoder;
+
+DGFS::MeshletDecoder::DecodeInfo decodeInfo = decoder.GetDecodeInfo( streamPtr, streamSize );
+
+```
+
+The `DecodeInfo` structure encapsulates everything that a decoder needs to decode the stream.  
+
+The next step is to allocate a sufficient amount of memory and set up a `DecodeBuffers` structure with pointers to the various output buffers.  A `BindBufferMemory` method is provided to make this simple:
+
+```C
+void* allocation = malloc(decodeInfo.totalBufferSize);
+
+DGFS::MeshletDecoder::DecodeBuffers decodeBuffers;
+decoder.BindBufferMemory(decodeBuffers,allocation,decodeInfo);
+```
+
+The `BindBufferMemory` method is an optional convenience function.  An application is free to configure the `DecodeBuffers` structure manually if it wishes, 
+as long as the allocation sizes specified in the `DecodeInfo` structure are respected.
+
+After configuring the `DecodeBuffers` structure, the last step is to call `Decode` which will populate the `DecodeBuffers` with data.
+
+```C
+decoder.Decode(decodeBuffers, streamPtr, streamSize);
+```
+
 ## Using DGFTester
 
 The 'DGFTester' tool can be used to encode OBJ or PLY models and verify that the encoding is correct.  It's syntax is:
@@ -480,6 +577,7 @@ USAGE: DGFTester.exe <infile> [OPTIONS]
          --cluster-max-faces <uint>
          --cluster-max-vertices <uint>
          --target-bits <uint>
+         --exponent <int>
          --print-perf
          --skip-validation
          --dump-obj <path>
@@ -490,6 +588,17 @@ USAGE: DGFTester.exe <infile> [OPTIONS]
          --forced-offset-width <uint> <uint> <uint>
          --user-data
          --packer {HPG24|SAH}
+         --weld-vertices
+         --test-preclustering
+         --quantize-for-animation
+         --deformation-padding <float>
+         --generate-omm-ids
+         --random-omm-ids <num_omms>
+         --post-quant-welding
+         --sah-block-size <block_size>
+         --test-dgfs
+         --dgfs-random-primid
+         --dgfs-random-user-data
 ```		 
 
 By default the tool will compress the input model and print compression statistics.  It will also validate the decoded geometry to ensure that it matches the input, and that the quantized positions are as expected.
@@ -497,6 +606,8 @@ By default the tool will compress the input model and print compression statisti
 The `--dump-obj` option may be used to decode the compressed geometry and write a corresponding obj file.  
 
 The `--print-perf` option may be used to profile the baking process.
+
+The `--test-dgfs` option is used to exercise [DGF SuperCompression](#dgf-supercompression)
 
 ## Decoding DGF in HLSL
 
@@ -534,4 +645,3 @@ float3 CalculateDGFNormal( ByteAddressBuffer dgfBlockBuffer, uint dgfBlockIndex,
     return normalize(cross(V1 - V0, V2 - V0));
 }
 ```
-

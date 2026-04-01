@@ -33,14 +33,19 @@ namespace DGFBaker
     int32_t Quantize(float value, int8_t exponent);
     float DeQuantize(int32_t value, int8_t exponent);
     void QuantizeVerts(const std::span<float3> vertices, int8_t exponent);
-    void QuantizeVerts(const std::span<int3> verticesOut, const float3* vertices, int8_t exponent);
+    void QuantizeVerts(int3* verticesOut, const float3* verticesIn, size_t numVertices, int8_t Exp);
     void DeQuantizeVerts(const std::span<float3> verticesOut, const std::span<const int3> quantizedVertices, int8_t exponent);
 
 
     int8_t ChooseQuantizationExponent(const DGFBaker::ClusteredMesh& mesh, const DGFBaker::Config& config);
 
+    // Helper functions to determine the appropriate quantization exponent for a given float value and target precision
+    int8_t ComputeQuantizationExponentPositive(float value, size_t precision = 23);
+    int8_t ComputeQuantizationExponentNegative(float value); // implicitly precision=23, only used for anchors
     
     int3 QuantizeVert(float3 v, int8_t exp);
     float3 DeQuantizeVert(int3 v, int8_t exp);
+
+    void QuantizationSanityChecks();
 
 } // namespace DGF

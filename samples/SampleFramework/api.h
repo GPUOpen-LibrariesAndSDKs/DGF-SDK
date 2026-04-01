@@ -21,6 +21,7 @@
 // THE SOFTWARE.
 #pragma once
 
+#include <functional>
 #include <cstdint>
 #include <span>
 #include "ShaderCompiler.h"
@@ -33,6 +34,8 @@ namespace api
     constexpr size_t MAX_DISPATCHES_PER_FRAME = 128;
     constexpr size_t MAX_DESCRIPTORS_PER_DISPATCH = 32;
     constexpr size_t MAX_PIPELINES = 256;
+    constexpr size_t RTAS_ALIGNMENT = 256;
+
 
     typedef uint64_t GPUVA;
 
@@ -140,10 +143,15 @@ namespace api
         DGF_BOTTOM_LEVEL
     };
 
+    class RTASBuffer : public RefCount
+    {
+    public:
+
+    };
+
     class RTAS : public RefCount
     {
     public:
-        virtual GPUVA GetGPUVirtualAddress() = 0;
         virtual GPUVA GetRTASReference() = 0;
     };
 
@@ -152,6 +160,37 @@ namespace api
     {
         RTAS_PREFER_FAST_TRACE = 1<<0,
         RTAS_PREFER_FAST_BUILD = 1<<1
+    };
+
+    struct BLASDesc
+    {
+        // Vertex format is implicitly R32G32B32_FLOAT
+        // Index format is implicity R32_UINT
+        api::Buffer* VertexBuffer;
+        api::Buffer* IndexBuffer;
+        uint32_t VertexByteOffset;
+        uint32_t IndexByteOffset;
+        uint32_t NumVertices;
+        uint32_t NumIndices;
+        uint32_t VertexStride;
+    };
+
+    struct DGFBLASDesc
+    {
+        api::Buffer* blocks;
+        size_t blocksByteOffset;
+        uint32_t numBlocks;
+        uint32_t numTriangles;
+        uint32_t numVertices;
+        uint32_t maxPrimitiveIndex;
+        uint32_t maxGeometryIndex;
+    };
+
+    struct TLASDesc
+    {
+        api::Buffer* InstanceBuffer;
+        uint32_t InstancesByteOffset;
+        uint32_t NumInstances;
     };
 
     struct RTASDesc
@@ -163,31 +202,9 @@ namespace api
         uint32_t Flags;
         union
         {
-            // Vertex format is implicitly R32G32B32_FLOAT
-            // Index format is implicity R32_UINT
-            struct {
-                api::Buffer* VertexBuffer;
-                api::Buffer* IndexBuffer;
-                uint32_t VertexByteOffset;
-                uint32_t IndexByteOffset;
-                uint32_t NumVertices;
-                uint32_t NumIndices;
-                uint32_t VertexStride;
-            } BLAS;
-            struct {
-                api::Buffer* blocks;
-                size_t blocksByteOffset;
-                uint32_t numBlocks;
-                uint32_t numTriangles;
-                uint32_t numVertices;
-                uint32_t maxPrimitiveIndex;
-                uint32_t maxGeometryIndex;
-            } DGFBLAS;
-            struct {
-                api::Buffer* InstanceBuffer;
-                uint32_t InstancesByteOffset;
-                uint32_t NumInstances;
-            } TLAS;
+            BLASDesc    BLAS;
+            DGFBLASDesc DGFBLAS;
+            TLASDesc    TLAS;
         };
     };
 
@@ -286,6 +303,8 @@ namespace api
         virtual void RecordTimer(TimerHeap* heap, size_t timerIndex) = 0;
     };
 
+    typedef std::function<void()> FrameSyncCallback;
+
  
     class Device : public RefCount
     {
@@ -301,6 +320,8 @@ namespace api
         virtual void SubmitCommandList(CommandList* commandList) = 0;
 
         virtual RTASPrebuildInfo GetRTASPrebuildInfo(const RTASDesc& desc) = 0;
+
+        virtual void ScheduleFrameSyncCallback(FrameSyncCallback cb) = 0;
 
         // Presents and advances to the next frame
         virtual void PresentAndAdvanceFrame() = 0;
@@ -324,13 +345,22 @@ namespace api
 
         virtual Texture* CreateUAVTexture(uint32_t width, uint32_t height) = 0;
 
-        virtual RTAS* CreateRTAS(size_t size) = 0;
+        virtual RTASBuffer* CreateRTASBuffer(size_t size) = 0;
+        virtual RTAS* CreateRTAS(RTASBuffer* buffer, size_t offset, size_t size) = 0;
 
         virtual Buffer* CreateUAVBuffer(size_t size) = 0;
         virtual Buffer* CreateDynamicBuffer(size_t size) = 0;
         virtual Buffer* CreateBuffer(size_t size) = 0;
-
+        
+        // TODO: Deprecate the "Dynamic buffer" concept.. replace with upload/readback buffers and explicit frame sync
+        //   Less API code this way
+        virtual void* MapDynamicBuffer(Buffer* buffer) = 0;
+        virtual void UnmapDynamicBuffer(Buffer* buffer, size_t byteWritten) = 0;
         virtual void WriteDynamicBuffer(Buffer* buffer, const void* bytes, size_t size) = 0;
+
+        virtual Buffer* CreateUploadBuffer(size_t size) = 0;;
+        virtual void* MapBuffer(Buffer* buffer, size_t readRangeSize) = 0;
+        virtual void UnmapBuffer(Buffer* buffer, size_t writeRangeSize) = 0;
 
         virtual void IMGUI_NewFrame() = 0;
         

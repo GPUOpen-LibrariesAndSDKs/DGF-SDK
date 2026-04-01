@@ -89,7 +89,8 @@ private:
                                              .targetBitWidth         = 24,
                                              .quantizeForAnimation   = true,      // use cluster diagonal instead of AABB extents for quantization
                                              .clusterDeformationPadding = 1.03f,  // fudge-factor for non-rigid animation
-                                             .enableExponentAdjust   = false};
+                                             .enableExponentAdjust   = false,
+                                             .allowInternalThreading = true };
 
         DisplayMode  displayMode  = DisplayMode::VertexNormals;
         BVHBuildMode bvhBuildMode = BVHBuildMode::Rebuild;
@@ -146,8 +147,11 @@ private:
     ComPtr<api::Texture>                        m_raytracingBackBuffer;
     ComPtr<api::Buffer>                         m_asScratchResource;
 
-    ComPtr<api::RTAS>   m_blas;
-    ComPtr<api::RTAS>   m_tlas;
+    ComPtr<api::RTASBuffer> m_rtasBuffer;
+    ComPtr<api::RTAS>       m_blas;
+    ComPtr<api::RTAS>       m_tlas;
+    size_t                  m_blasOffset = 0;
+    size_t                  m_tlasOffset = 0;
     ComPtr<api::Buffer> m_rtasDecodeBuffer;
     ComPtr<api::Buffer> m_instanceDescBuffer;
     ComPtr<api::Buffer> m_rtConstantsBuffer;

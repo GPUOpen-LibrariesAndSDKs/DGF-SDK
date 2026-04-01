@@ -519,7 +519,7 @@ api::CommandList* DGFSample::RenderRaytraced(api::Texture* backBuffer)
 
 void DGFSample::AllocateBVHResources()
 {
-    DGFBVHBuilder::PrebuildInfo dgfPBI = m_dgfBvhBuilder.GetPrebuildInfo(*m_dgfModel, m_uiData.useNativeDGF);
+    DGFBVHBuilder::PrebuildInfo dgfPBI = m_dgfBvhBuilder.GetPrebuildInfo(m_dgfModel->GetDGFBLASDesc(), m_uiData.useNativeDGF);
 
     api::RTASDesc tlasDesc;
     tlasDesc.Type                = api::RTASType::TOP_LEVEL;
@@ -531,8 +531,13 @@ void DGFSample::AllocateBVHResources()
 
     size_t scratchResourceSize = std::max(dgfPBI.bvhBuildScratchSize, (UINT)tlasPBI.buildScratchSize);
 
-    m_tlas = m_device->CreateRTAS(tlasPBI.rtasSize);
-    m_blas = m_device->CreateRTAS(dgfPBI.bvhSize);
+    m_blasOffset = 0;
+    m_tlasOffset = RoundUpPow2(dgfPBI.bvhSize, api::RTAS_ALIGNMENT);
+    size_t totalRTASSize = m_tlasOffset + tlasPBI.rtasSize;
+    
+    m_rtasBuffer = m_device->CreateRTASBuffer(totalRTASSize);
+    m_blas = m_device->CreateRTAS(m_rtasBuffer.Get(), m_blasOffset, dgfPBI.bvhSize);
+    m_tlas = m_device->CreateRTAS(m_rtasBuffer.Get(), m_tlasOffset, tlasPBI.rtasSize);
 
     m_asScratchResource  = m_device->CreateUAVBuffer(scratchResourceSize);
     m_rtasDecodeBuffer   = m_device->CreateUAVBuffer(dgfPBI.decodeScratchSize);
@@ -563,7 +568,7 @@ void DGFSample::BuildBVH()
     api::CommandList* cmdList = m_device->BeginCommandList();
 
     // build the blas
-    m_dgfBvhBuilder.Build(m_rtasDecodeBuffer.Get(), 0, m_asScratchResource.Get(), m_blas.Get(), *m_dgfModel, cmdList, m_uiData.useNativeDGF);
+    m_dgfBvhBuilder.Build(m_rtasDecodeBuffer.Get(), 0, m_asScratchResource.Get(), 0, m_blas.Get(), m_dgfModel->GetDGFBLASDesc(), cmdList, m_uiData.useNativeDGF);
 
     cmdList->UAVBarrier();
 

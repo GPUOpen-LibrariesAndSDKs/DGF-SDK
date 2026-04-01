@@ -177,6 +177,22 @@ namespace {
 
 }  // namespace
 
+float4x4 operator*(const float4x4& l, const float4x4& r)
+{
+    float4x4 ret;
+    for (size_t i = 0; i < 4; i++)
+    {
+        for (size_t j = 0; j < 4; j++)
+        {
+            float x = l(i, 0) * r(0,j);
+            for (size_t k = 1; k < 4; k++)
+                x += l(i, k) * r(k, j);
+            ret.d[4 * i + j] = x;
+        }
+    }
+    return ret;
+}
+
 DGFMesh::DGFMesh(const std::filesystem::path pathToFile)
 {
     LoadBinary(pathToFile);
@@ -224,6 +240,19 @@ void DGFMesh::LoadBinary(const std::filesystem::path pathToFile)
     if (!file.good()) {
         throw std::runtime_error(std::format("Error loading DGF file \"{}\".", pathToFile.string()));
     }
+}
+
+api::DGFBLASDesc DGFMesh::GetDGFBLASDesc() const
+{
+    api::DGFBLASDesc desc;
+    desc.blocks = GetDGFBlockBuffer();
+    desc.blocksByteOffset = 0;
+    desc.maxGeometryIndex = GetMaxGeometryIndex();
+    desc.maxPrimitiveIndex = GetMaxPrimitiveIndex();
+    desc.numBlocks = (uint32_t)GetNumDGFBlocks();
+    desc.numTriangles = (uint32_t)GetNumBlockTriangles();
+    desc.numVertices = (uint32_t)GetNumBlockVertices();
+    return desc;
 }
 
 const std::vector<uint8_t>& DGFMesh::GetDGFBlocks() const
@@ -602,7 +631,7 @@ inline void ThrowIfFailed(HRESULT hr)
     }
 }
 
-std::wstring OpenFileDialog()
+std::wstring OpenFileDialog( const wchar_t* fileType, const wchar_t* extensions )
 {
     if (FAILED(CoInitializeEx(NULL, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE))) {
         return L"";
@@ -612,7 +641,7 @@ std::wstring OpenFileDialog()
     try {
         ComPtr<IFileOpenDialog> pFileOpen;
         ComPtr<IShellItem>      pItem;
-        COMDLG_FILTERSPEC       ComDlgFS[2] = {{L"Mesh Files", L"*.ply;*.obj"}, {L"All Files", L"*.*"}};
+        COMDLG_FILTERSPEC       ComDlgFS[2] = {{fileType,extensions}, {L"All Files", L"*.*"}};
 
         ThrowIfFailed(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_ALL, IID_PPV_ARGS(&pFileOpen)));
         ThrowIfFailed(pFileOpen->SetFileTypes(2, ComDlgFS));

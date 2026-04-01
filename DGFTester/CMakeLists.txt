@@ -22,6 +22,6 @@
 
 set( APP_NAME DGFTester )
 
-add_executable( ${APP_NAME} DGFTester.cpp )
+add_executable( ${APP_NAME} DGFTester.cpp SuperCompressionTester.cpp CommandLine.h CommandLine.cpp )
 target_link_libraries( ${APP_NAME} PUBLIC DGFLib DGFBaker miniply tinyobj ) 
 set_property(TARGET ${APP_NAME} PROPERTY CXX_STANDARD 20)

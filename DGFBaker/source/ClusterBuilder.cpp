@@ -31,6 +31,8 @@
 
 #include "DGFBaker.h"
 
+#include "Threading.h"
+
 namespace DGFBaker
 {
 
@@ -40,7 +42,7 @@ struct alignas(16) PrimRef
     uint32_t triangleIndex;
     float3 bbmax;
     uint8_t binIndex[3];
-    uint8_t _pad;
+    uint8_t invalid;
 
     SIMDBox LoadBox()
     {
@@ -83,7 +85,7 @@ static void WeldVertices(Cluster& cluster, const uint16_t* tmpIndices, const DGF
     std::sort(&tmpVerts[0], &tmpVerts[numVerts]);
 
     // map all duplicated verts onto the same original vert
-    std::array<uint8_t, DGFBaker::MAX_CLUSTER_VERTICES> indexRemap;
+    std::array<uint8_t, 3*DGFBaker::MAX_CLUSTER_FACES> indexRemap;
     size_t n = 0;
     size_t i = 0;
     do
@@ -197,7 +199,7 @@ static Cluster BuildCluster(PrimRef* primRefs, size_t numTris, const DGFBaker::B
         }
     }
 
-    return std::move(outputCluster);
+    return outputCluster;
 }
 
 static void PostProcessCluster( std::vector<Cluster>& clusters, Cluster& cluster, const DGFBaker::BakerMesh& mesh )
@@ -279,14 +281,216 @@ static void PostProcessCluster( std::vector<Cluster>& clusters, Cluster& cluster
     }
 }
 
-
-void BuildClustersBinSAH(const DGFBaker::BakerMesh& mesh, std::vector<Cluster>& clusters, size_t maxVerts, size_t maxFaces, bool weldVerts)
+struct Split
 {
-    constexpr size_t NUM_BINS = 256;
+    uint32_t bestAxis ;
+    uint32_t bestBin;
+    float bestSAH;
+};
+
+template< int NUM_BINS >
+struct Bins
+{
+    SIMDBox binBounds[3][NUM_BINS];
+    uint32_t binCount[3][NUM_BINS] = { {0} };
+
+    void InsertPrimRef(PrimRef& ref, SIMDVecf centroidScale, SIMDVecf centroidBBMin )
+    {
+        SIMDBox refBox = ref.LoadBox();
+        SIMDVecf centroid = refBox.Centroid();
+        SIMDVecf binIndex = (centroid - centroidBBMin) * centroidScale;
+        binIndex = min(binIndex, (NUM_BINS - 1.0f));
+        SIMDVeci binIndices = SIMDVeci(binIndex);
+        uint32_t bx = binIndices.X();
+        uint32_t by = binIndices.Y();
+        uint32_t bz = binIndices.Z();
+
+        binBounds[0][bx].Expand(refBox);
+        binBounds[1][by].Expand(refBox);
+        binBounds[2][bz].Expand(refBox);
+        binCount[0][bx]++;
+        binCount[1][by]++;
+        binCount[2][bz]++;
+
+        ref.binIndex[0] = bx;
+        ref.binIndex[1] = by;
+        ref.binIndex[2] = bz;
+    }
+
+    void MergeWith(const Bins<NUM_BINS>& rhs)
+    {
+        for (size_t i = 0; i < NUM_BINS; i++)
+        {
+            binBounds[0][i].Expand(rhs.binBounds[0][i]);
+            binBounds[1][i].Expand(rhs.binBounds[1][i]);
+            binBounds[2][i].Expand(rhs.binBounds[2][i]);
+        }
+        for (size_t i = 0; i < NUM_BINS; i++)
+        {
+            binCount[0][i] += rhs.binCount[0][i];
+            binCount[1][i] += rhs.binCount[1][i];
+            binCount[2][i] += rhs.binCount[2][i];
+        }
+    }
+
+    Split SelectSplit( uint32_t numPrims, size_t sahBlockSize )
+    {
+        uint32_t bestAxis = 0;
+        uint32_t bestBin = NUM_BINS / 2;
+        float bestSAH = std::numeric_limits<float>::infinity();
+        for (uint32_t a = 0; a < 3; a++)
+        {
+            // sweep left/right and compute per-bin LR area and counts
+            SIMDBox leftBox = binBounds[a][0];
+            SIMDBox rightBox = binBounds[a][NUM_BINS - 1];
+            uint32_t count = binCount[a][0];
+
+            float leftArea[NUM_BINS];
+            float rightArea[NUM_BINS];
+            uint32_t leftCount[NUM_BINS];
+            for (size_t i = 1; i < NUM_BINS; i++)
+            {
+                leftArea[i - 1] = leftBox.HalfArea();
+                rightArea[NUM_BINS - i - 1] = rightBox.HalfArea();
+                leftCount[i - 1] = count;
+                leftBox.Expand(binBounds[a][i]);
+                rightBox.Expand(binBounds[a][NUM_BINS - i - 1]);
+                count += binCount[a][i];
+            }
+
+            DGF_ASSERT(count == numPrims);
+
+            // chboose the best bin to split on.. right-most bin is not considered
+            for (uint32_t i = 0; i < NUM_BINS - 1; i++)
+            {
+                float al = leftArea[i];
+                float ar = rightArea[i];
+                uint32_t cl = leftCount[i];
+                uint32_t cr = numPrims - cl;
+
+                float sah = static_cast<float>(ceil(cl / sahBlockSize) * al + ceil(cr / sahBlockSize) * ar);
+
+                if (sah < bestSAH)
+                {
+                    bestSAH = sah;
+                    bestBin = i;
+                    bestAxis = a;
+                }
+            }
+        }
+
+        return { bestAxis,bestBin,bestSAH };
+    }
+};
+
+
+struct Subtree
+{
+    AABB centroidBounds;    
+    PrimRef* primRefs;
+    uint32_t numPrims;
+};
+
+static void BuildSubtreeSequential( 
+    const DGFBaker::BakerMesh& mesh, 
+    size_t maxFaces, 
+    size_t maxVerts, 
+    bool weldVerts,
+    size_t sahBlockSize,
+    Subtree tree, 
+    std::vector<Cluster>& clusters )
+{
+    std::vector<Subtree> subtrees;
+    subtrees.push_back(tree);
+
+    while (!subtrees.empty())
+    {
+        Subtree tree = subtrees.back(); subtrees.pop_back();
+        PrimRef* primRefs = tree.primRefs;
+        Subtree left, right;
+        constexpr size_t NUM_BINS = 256;
+        static_assert(NUM_BINS <= 256);
+
+        uint32_t numPrims = tree.numPrims;
+        if (numPrims <= maxFaces)
+        {
+            // if face count is below the threshold, try to build a cluster
+            Cluster cluster = BuildCluster(primRefs, tree.numPrims, mesh, weldVerts);
+            if (cluster.VertexIndices.size() <= maxVerts)
+            {
+                // keep the cluster if it meets the vertex limit
+                //  otherwise, we need to split more
+                PostProcessCluster(clusters, cluster, mesh);
+                continue;
+            }
+        }
+
+        PrimRef* subtreeRefs = primRefs;
+        AABB centroidBounds = tree.centroidBounds;
+
+        // special case where all triangles have identical centroids
+        // binned-sah will fail to partition things in this case, so split prims in the middle
+        float3 centroidDiag = centroidBounds.Max - centroidBounds.Min;
+        if (centroidDiag.x == 0 && centroidDiag.y == 0 && centroidDiag.z == 0)
+        {
+            uint32_t numLeft = numPrims / 2;
+            uint32_t numRight = numPrims - numLeft;
+            DGF_ASSERT(numLeft > 0 && numRight > 0);
+            subtrees.push_back({ centroidBounds, primRefs, numLeft });
+            subtrees.push_back({ centroidBounds, primRefs + numLeft, numRight });
+            continue;
+        }
+
+        SIMDVecf centroidScale = ((float)(NUM_BINS)) / (centroidDiag);
+        SIMDVecf centroidBBMin = centroidBounds.Min;
+
+        // initialize bins
+        Bins<NUM_BINS> bins;
+
+        // place primitives into bins by centroid
+        for (size_t i = 0; i < numPrims; i++)
+            bins.InsertPrimRef(subtreeRefs[i], centroidScale, centroidBBMin);
+
+        // select split       
+        Split split = bins.SelectSplit(numPrims, sahBlockSize);
+
+        // partition prim-refs
+        uint32_t front = 0;
+        uint32_t back = numPrims;
+        SIMDBox leftCentroidBounds;
+        SIMDBox rightCentroidBounds;
+        for (size_t i = 0; i < numPrims; i++)
+        {
+            PrimRef& ref = subtreeRefs[front];
+            SIMDBox refBox = ref.LoadBox();
+            SIMDVecf centroid = refBox.Centroid();
+            if (ref.binIndex[split.bestAxis] <= split.bestBin)
+            {
+                leftCentroidBounds.Expand(centroid);
+                front++;
+            }
+            else
+            {
+                rightCentroidBounds.Expand(centroid);
+                std::swap(subtreeRefs[front], subtreeRefs[--back]);
+            }
+        }
+
+        uint32_t numLeft = front;
+        uint32_t numRight = numPrims - front;
+        DGF_ASSERT(numLeft > 0);
+        DGF_ASSERT(numRight > 0);
+        DGF_ASSERT(numLeft + numRight == numPrims);
+        subtrees.push_back({ leftCentroidBounds.ToAABB(),  primRefs, numLeft });
+        subtrees.push_back({ rightCentroidBounds.ToAABB(), primRefs+ numLeft, numRight });
+    }
+}
+
+
+void BuildClustersBinSAH(const DGFBaker::BakerMesh& mesh, std::vector<Cluster>& clusters, size_t maxVerts, size_t maxFaces, bool weldVerts, size_t sahBlockSize)
+{
     size_t numTris = mesh.GetTriangleCount();
-
-    static_assert(NUM_BINS <= 256);
-
+    
     std::vector< PrimRef > primRefs;
 
     // construct triangle AABBs and primID list
@@ -325,146 +529,109 @@ void BuildClustersBinSAH(const DGFBaker::BakerMesh& mesh, std::vector<Cluster>& 
     if (primRefs.empty())
         return;
 
-    numTris = primRefs.size();
-    
-    struct Subtree
-    {
-        AABB centroidBounds;
-        uint32_t startPrim;
-        uint32_t numPrims;
-    };
-
     std::vector<Subtree> subtrees;
     Subtree root;
     root.centroidBounds = centroidBounds;
-    root.startPrim = 0;
-    root.numPrims = (uint32_t)numTris;
-    subtrees.push_back(root);
+    root.primRefs = primRefs.data();
+    root.numPrims = (uint32_t)primRefs.size();
+   
+    BuildSubtreeSequential(mesh, maxFaces, maxVerts, weldVerts, sahBlockSize, root, clusters);
+}
 
-    std::vector<Subtree> pendingClusters;
 
-    constexpr float inf = std::numeric_limits<float>::infinity();
 
-    while (!subtrees.empty())
+class ParallelSubtree
+{
+public:
+    Subtree tree;
+    std::vector<Cluster> clusters;
+    ParallelSubtree* children = nullptr;
+};
+
+static void BuildSubtreeParallel(
+    const DGFBaker::BakerMesh& mesh,
+    ParallelSubtree* root,
+    size_t maxVerts,
+    size_t maxFaces,
+    bool weldVerts,
+    size_t sahBlockSize)
+{
+    Subtree & tree = root->tree;
+    uint32_t numPrims = tree.numPrims;
+    PrimRef* primRefs = tree.primRefs;
+    
+    constexpr size_t SERIAL_THRESHOLD = 32768;
+    constexpr size_t NUM_BINS = 256;
+
+    if (numPrims <= maxFaces)
     {
-        Subtree tree = subtrees.back(); subtrees.pop_back();
-        uint32_t numPrims = tree.numPrims;
-        if (numPrims <= maxFaces)
+        // if face count is below the threshold, try to build a cluster
+        Cluster cluster = BuildCluster(primRefs, tree.numPrims, mesh, weldVerts);
+        if (cluster.VertexIndices.size() <= maxVerts)
         {
-            // if face count is below the threshold, try to build a cluster
-            Cluster cluster = BuildCluster(&primRefs[tree.startPrim], tree.numPrims, mesh, weldVerts);            
-            if (cluster.VertexIndices.size() <= maxVerts)
-            {                
-                // keep the cluster if it meets the vertex limit
-                //  otherwise, we need to split more
-                PostProcessCluster(clusters, cluster, mesh);
-                continue;
-            }
+            // keep the cluster if it meets the vertex limit
+            //  otherwise, we need to split more
+            PostProcessCluster(root->clusters, cluster, mesh);
+            return;
         }
+    }
+    else if (numPrims <= SERIAL_THRESHOLD)
+    {
+        BuildSubtreeSequential(mesh, maxFaces, maxVerts, weldVerts, sahBlockSize, tree, root->clusters);
+        return;
+    }
 
-        PrimRef* subtreeRefs = primRefs.data() + tree.startPrim;
-        centroidBounds = tree.centroidBounds;
+    AABB centroidBounds = tree.centroidBounds;
 
-        // special case where all triangles have identical centroids
-        // binned-sah will fail to partition things in this case, so split prims in the middle
-        float3 centroidDiag = centroidBounds.Max - centroidBounds.Min;
-        if (centroidDiag.x == 0 && centroidDiag.y == 0 && centroidDiag.z == 0)
-        {
-            uint32_t numLeft = numPrims / 2;
-            uint32_t numRight = numPrims - numLeft;
-            DGF_ASSERT(numLeft > 0 && numRight > 0);
-            subtrees.push_back({ centroidBounds, tree.startPrim, numLeft });
-            subtrees.push_back({ centroidBounds, tree.startPrim + numLeft, numRight });
-            continue;
-        }
+    // special case where all triangles have identical centroids
+    // binned-sah will fail to partition things in this case, so split prims in the middle
+    float3 centroidDiag = centroidBounds.Max - centroidBounds.Min;
+    if (centroidDiag.x == 0 && centroidDiag.y == 0 && centroidDiag.z == 0)
+    {
+        BuildSubtreeSequential(mesh, maxFaces, maxVerts, weldVerts, sahBlockSize, tree, root->clusters);
+        return;
+    }
 
+    // choose a split
+    Split split;
+    {        
         SIMDVecf centroidScale = ((float)(NUM_BINS)) / (centroidDiag);
         SIMDVecf centroidBBMin = centroidBounds.Min;
 
-        // initialize bins
-        SIMDBox binBounds[3][NUM_BINS];
-        uint32_t binCount[3][NUM_BINS] = { {0} };
-
-        // place primitives into bins by centroid
-        for (size_t i = 0; i < numPrims; i++)
-        {
-            PrimRef& ref = subtreeRefs[i];
-            SIMDBox refBox = ref.LoadBox();
-            SIMDVecf centroid = refBox.Centroid();
-            SIMDVecf binIndex = (centroid - centroidBBMin) * centroidScale;
-            binIndex = min(binIndex, (NUM_BINS - 1.0f));
-            SIMDVeci binIndices = SIMDVeci(binIndex);
-            uint32_t bx = binIndices.X();
-            uint32_t by = binIndices.Y();
-            uint32_t bz = binIndices.Z();
-
-            binBounds[0][bx].Expand(refBox);
-            binBounds[1][by].Expand(refBox);
-            binBounds[2][bz].Expand(refBox);
-            binCount[0][bx]++;
-            binCount[1][by]++;
-            binCount[2][bz]++;
-
-            ref.binIndex[0] = bx;
-            ref.binIndex[1] = by;
-            ref.binIndex[2] = bz;
-        }
-
-        // select split
-        uint32_t bestAxis = 0;
-        uint32_t bestBin = NUM_BINS / 2;
-        float bestSAH = inf;
-        for (uint32_t a = 0; a < 3; a++)
-        {
-            // sweep left/right and compute per-bin LR area and counts
-            SIMDBox leftBox = binBounds[a][0];
-            SIMDBox rightBox = binBounds[a][NUM_BINS - 1];
-            uint32_t count = binCount[a][0];
-
-            float leftArea[NUM_BINS];
-            float rightArea[NUM_BINS];
-            uint32_t leftCount[NUM_BINS];
-            for (size_t i = 1; i < NUM_BINS; i++)
+        Bins<NUM_BINS> bins = Threading::ParallelReduce(
+            tree.numPrims,
+            [tree, centroidScale, centroidBBMin](size_t begin, size_t end)
             {
-                leftArea[i - 1] = leftBox.HalfArea();
-                rightArea[NUM_BINS - i - 1] = rightBox.HalfArea();
-                leftCount[i - 1] = count;
-                leftBox.Expand(binBounds[a][i]);
-                rightBox.Expand(binBounds[a][NUM_BINS - i - 1]);
-                count += binCount[a][i];
-            }
-
-            DGF_ASSERT(count == numPrims);
-
-            // chboose the best bin to split on.. right-most bin is not considered
-            for (uint32_t i = 0; i < NUM_BINS - 1; i++)
+                Bins<NUM_BINS> bins;
+                for (size_t i = begin; i < end; i++)
+                    bins.InsertPrimRef(tree.primRefs[i], centroidScale, centroidBBMin);
+                return bins;
+            },
+            [](Bins<NUM_BINS> a, Bins<NUM_BINS> b)
             {
-                float al = leftArea[i];
-                float ar = rightArea[i];
-                uint32_t cl = leftCount[i];
-                uint32_t cr = numPrims - cl;
-
-                float sah = al * cl + ar * cr;
-                if (sah < bestSAH)
-                {
-                    bestSAH = sah;
-                    bestBin = i;
-                    bestAxis = a;
-                }
+                a.MergeWith(b);
+                return a;
             }
-        }
+        );
 
-        // partition prim-refs
+        // merge bins and select split
+        split = bins.SelectSplit(tree.numPrims, sahBlockSize);
+    }
+
+    {
+        // partition prim-refs and compute l/r centroid bounds at the same time
+        // it is faster to do this serially.  A parallel partition on the primref array might be faster still,
+        // but it would be difficult to ensure identical results between threaded and non-threaded paths
         uint32_t front = 0;
         uint32_t back = numPrims;
         SIMDBox leftCentroidBounds;
         SIMDBox rightCentroidBounds;
         for (size_t i = 0; i < numPrims; i++)
         {
-            PrimRef& ref = subtreeRefs[front];
+            PrimRef& ref = tree.primRefs[front];
             SIMDBox refBox = ref.LoadBox();
             SIMDVecf centroid = refBox.Centroid();
-            if (ref.binIndex[bestAxis] <= bestBin)
+            if (ref.binIndex[split.bestAxis] <= split.bestBin)
             {
                 leftCentroidBounds.Expand(centroid);
                 front++;
@@ -472,7 +639,7 @@ void BuildClustersBinSAH(const DGFBaker::BakerMesh& mesh, std::vector<Cluster>& 
             else
             {
                 rightCentroidBounds.Expand(centroid);
-                std::swap(subtreeRefs[front], subtreeRefs[--back]);
+                std::swap(tree.primRefs[front], tree.primRefs[--back]);
             }
         }
 
@@ -481,11 +648,145 @@ void BuildClustersBinSAH(const DGFBaker::BakerMesh& mesh, std::vector<Cluster>& 
         DGF_ASSERT(numLeft > 0);
         DGF_ASSERT(numRight > 0);
         DGF_ASSERT(numLeft + numRight == numPrims);
+        Subtree left  = { leftCentroidBounds.ToAABB(),  primRefs, numLeft };
+        Subtree right = { rightCentroidBounds.ToAABB(), primRefs + numLeft, numRight };
 
-        subtrees.push_back({ leftCentroidBounds.ToAABB(),  tree.startPrim, numLeft });
-        subtrees.push_back({ rightCentroidBounds.ToAABB(), tree.startPrim + numLeft, numRight });
+        // go wide on subtrees (parallel for)
+        root->children = new ParallelSubtree[2];
+        root->children[0].tree = left;
+        root->children[1].tree = right;
+
+        Threading::ParallelFor(2,
+            [root,&mesh,maxVerts,maxFaces,weldVerts,sahBlockSize](size_t childIndex)
+            {
+                BuildSubtreeParallel(mesh, &root->children[childIndex], maxVerts, maxFaces, weldVerts, sahBlockSize);
+            }
+        );
+    }
+
+    
+}
+
+
+void BuildClustersBinSAH_Parallel(
+    const DGFBaker::BakerMesh& mesh,
+    std::vector<Cluster>& clusters,
+    size_t maxVerts,
+    size_t maxFaces,
+    bool weldVertices,
+    size_t sahBlockSize)
+{
+    // TODO: preprocess primrefs in parallel
+    size_t numPrims = mesh.GetTriangleCount();
+
+    std::vector<PrimRef> primRefs(numPrims);
+    
+    AABB centroidBounds;
+
+    centroidBounds = Threading::ParallelReduce( numPrims,
+        [&primRefs,&mesh, weldVertices](size_t start, size_t end)
+        {
+            AABB centroidBounds;
+            for (size_t i = start; i < end; i++)
+            {
+                primRefs[i].invalid = 1; // mark primref invalid
+
+                uint32_t idx[3];
+                mesh.ReadIndices(idx, (uint32_t)i);
+
+                // filter index-degenerates
+                uint32_t a = idx[0];
+                uint32_t b = idx[1];
+                uint32_t c = idx[2];
+                if (a == b || b == c || a == c)
+                    continue;
+
+                float vertices[9];
+                mesh.ReadVertices(vertices, idx, 3);
+                static_assert(sizeof(float3) == 3 * sizeof(float), "The compiler did something unexpected");
+                float3 v0 = float3(vertices[0], vertices[1], vertices[2]);
+                float3 v1 = float3(vertices[3], vertices[4], vertices[5]);
+                float3 v2 = float3(vertices[6], vertices[7], vertices[8]);
+
+                // filter position degenerates if vertex welding is requested
+                //   they will turn into index-degenerates
+                if (weldVertices && ((v0 == v1) || (v1 == v2) || (v2 == v0)))
+                    continue;
+
+                float3 bbmin = min(v0, min(v1, v2));
+                float3 bbmax = max(v0, max(v1, v2));
+                primRefs[i] = { bbmin,(uint32_t)i,bbmax,{0},0 };
+
+                centroidBounds.Expand((bbmin + bbmax) * 0.5f);
+            }
+            return centroidBounds;
+        },
+        [](AABB a, AABB b)
+        {
+            a.Expand(b);
+            return a;
+        }
+    );
+
+    // compact primref array sequentially
+    size_t numValidPrims = 0;
+    for (size_t i = 0; i < numPrims; i++)
+    {
+        if (primRefs[i].invalid == 0)
+            primRefs[numValidPrims++] = primRefs[i];        
+    }
+    primRefs.resize(numValidPrims);
+    
+    // allocate parallel subtree
+    ParallelSubtree root;
+    root.tree.centroidBounds = centroidBounds;
+    root.tree.numPrims       = (uint32_t) primRefs.size();
+    root.tree.primRefs       = primRefs.data();
+
+    BuildSubtreeParallel(mesh,&root,maxVerts,maxFaces,weldVertices, sahBlockSize);
+
+    // walk parallel tree in-order and export the clusters in a deterministic order
+    std::vector<ParallelSubtree*> stack;
+    stack.push_back(&root);
+
+    do
+    {
+        ParallelSubtree* t = stack.back();
+        stack.pop_back();
+        
+        while (t->clusters.empty())
+        {
+            DGF_ASSERT(t->children != nullptr);
+            stack.push_back(&t->children[1]);
+            t = &t->children[0];
+        }
+
+        clusters.insert(clusters.end(),
+            std::make_move_iterator(t->clusters.begin()),
+            std::make_move_iterator(t->clusters.end()));
+
+    } while (!stack.empty());
+
+
+    // deallocate subtrees
+    if (root.children)
+    {
+        stack.push_back(root.children);
+        do
+        {
+            ParallelSubtree* t = stack.back();
+            stack.pop_back();
+
+            if( t[0].children )
+                stack.push_back(t[0].children);
+            if ( t[1].children )
+                stack.push_back(t[1].children);
+            delete[] t;
+
+        } while (!stack.empty());
     }
 }
+
 
 bool ValidateClusters(const std::vector<Cluster>& clusters, const DGFBaker::BakerMesh& mesh, size_t maxVerts, size_t maxFaces )
 {

@@ -39,6 +39,26 @@ namespace dx
         D3D12_GPU_VIRTUAL_ADDRESS GetGPUVirtualAddress() { return m_resource->GetGPUVirtualAddress(); }
         ID3D12Resource* GetResource() { return m_resource.Get(); }
         
+        void* Map(size_t readSize)
+        {
+            D3D12_RANGE range;
+            range.Begin = 0;
+            range.End = readSize;;
+            D3D12_RANGE* pRange = readSize ? &range : nullptr;
+            void* ppData=nullptr;
+            ThrowIfFailed(m_resource->Map(0, pRange, &ppData));
+            return ppData;
+        }
+
+        void Unmap(size_t writeSize)
+        {
+            D3D12_RANGE range;
+            range.Begin = 0;
+            range.End = writeSize;
+            D3D12_RANGE* pRange = writeSize ? &range : nullptr;
+            m_resource->Unmap(0, pRange);
+        }
+
     protected:
         friend class Device;
         Buffer(ComPtr<ID3D12Resource> resource) : m_resource(resource) {}
@@ -55,6 +75,8 @@ namespace dx
         DynamicBuffer(ComPtr<ID3D12Resource> renameChain[api::FRAME_COUNT]);
 
         void Write(const void* contents, size_t size, size_t frameIndex);
+        void* Map(size_t frameIndex);
+        void Unmap(size_t frameIndex,size_t bytesWritten);
 
         ComPtr<ID3D12Resource> m_renameChain[api::FRAME_COUNT];
     };
@@ -212,19 +234,39 @@ namespace dx
         ComPtr<ID3D12PipelineState> m_shader;
     };
 
-    class RTAS : public api::RTAS 
+    class RTASBuffer : public api::RTASBuffer
     {
     public:
-        virtual api::GPUVA GetGPUVirtualAddress() override { return m_resource->GetGPUVirtualAddress(); }
-        virtual api::GPUVA GetRTASReference() override { return m_resource->GetGPUVirtualAddress(); }
+        api::GPUVA GetGPUVirtualAddress() { return m_resource->GetGPUVirtualAddress(); }
+        ID3D12Resource* GetResource() { return m_resource.Get(); }
 
     private:
         friend class Device;
-        RTAS(ComPtr<ID3D12Resource> buffer)
+        RTASBuffer(ComPtr<ID3D12Resource> buffer)
             : m_resource(buffer)
         {
         }
         ComPtr<ID3D12Resource> m_resource;
+    };
+
+    class RTAS : public api::RTAS 
+    {
+    public:
+        virtual api::GPUVA GetRTASReference() override { return m_buffer->GetGPUVirtualAddress() + m_offset; }
+
+    private:
+        friend class Device;
+        RTAS(RTASBuffer* buffer, size_t offset)
+            : m_buffer(buffer), m_offset(offset)
+        {
+            m_buffer->AddRef();
+        }
+        ~RTAS()
+        {
+            m_buffer->Release();
+        }
+        RTASBuffer* m_buffer;
+        size_t m_offset;
     };
 
     class Device : public api::Device
@@ -266,7 +308,8 @@ namespace dx
 
         virtual dx::Texture* CreateUAVTexture(uint32_t width, uint32_t height) override;
 
-        virtual dx::RTAS* CreateRTAS(size_t size) override;
+        virtual dx::RTASBuffer* CreateRTASBuffer(size_t size) override;
+        virtual dx::RTAS* CreateRTAS(api::RTASBuffer* buffer, size_t offset, size_t size) override;
 
         virtual dx::Buffer* CreateUAVBuffer(size_t size) override;
         virtual dx::Buffer* CreateDynamicBuffer(size_t size) override;
@@ -279,8 +322,16 @@ namespace dx
         virtual dx::TimerHeap* CreateTimerHeap(size_t numTimers) override;
         
         virtual void WriteDynamicBuffer(api::Buffer* buffer, const void* contents, size_t size) override;
+        virtual void* MapDynamicBuffer(api::Buffer* buffer) override;
+        virtual void UnmapDynamicBuffer(api::Buffer* buffer, size_t bytesWritten) override;
 
         virtual std::wstring GetAPIName() override { return L"D3D12"; }
+
+        virtual void ScheduleFrameSyncCallback(api::FrameSyncCallback callback) override;
+
+        virtual dx::Buffer* CreateUploadBuffer(size_t size) override;
+        virtual void* MapBuffer(api::Buffer* buffer, size_t readRangeSize) override;
+        virtual void UnmapBuffer(api::Buffer* buffer, size_t writeRangeSize) override;
 
     private:
         friend Device* CreateDevice(HWND hwnd, HINSTANCE hInstance, uint32_t width, uint32_t height);
@@ -303,6 +354,7 @@ namespace dx
             ComPtr<ID3D12CommandAllocator> allocator;
             std::vector< dx::CommandList* > commandLists;
             UINT64 fenceValue;
+            std::vector<api::FrameSyncCallback> syncCallbacks;
         };
 
 

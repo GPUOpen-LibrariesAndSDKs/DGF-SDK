@@ -36,9 +36,11 @@ namespace DGFBaker
         size_t numVerts;
         size_t numTris;
         const float3* Verts;
+        const int3* QuantizedVerts;
         const uint8_t* Indices;
         const DGFBaker::TriangleAttributes* Attributes;
         int8_t exponent;
+        uint32_t primIDBase;
     };
 
     struct PackClusterResult

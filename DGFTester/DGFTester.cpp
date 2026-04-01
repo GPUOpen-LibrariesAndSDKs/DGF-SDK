@@ -33,16 +33,26 @@
 #include <chrono>
 #include <filesystem>
 
+#include <DGFS.h>
+#include "CommandLine.h"
+
 struct Mesh
 {
     std::vector<float> vertices; // 3 floats per vertex
     std::vector<uint32_t> indices;
     std::vector<uint32_t> materialIDs; // material ID per face
     size_t numMaterials = 0;
+
+    std::vector<float> uvs; // 2 floats per vertex
+    std::vector<int> uv_indices; // uv indices per face. May be -1 if model has no UVs
 };
 
-bool ParseOBJFile( const char* inputFile, Mesh& mesh, bool discardMaterials )
+
+bool ParseOBJFile( const char* inputFile, Mesh& mesh, const CommandLine& cmd )
 {
+    bool discardMaterials = cmd.discardMaterials;
+    bool keepUVCoords = cmd.generateOMMIDs;
+
     tinyobj::attrib_t attrib;
     std::vector<tinyobj::shape_t> shapes;
     std::vector<tinyobj::material_t> materials;
@@ -78,15 +88,19 @@ bool ParseOBJFile( const char* inputFile, Mesh& mesh, bool discardMaterials )
     // eliminate stuff we don't use here
     attrib.normals.clear();
     attrib.colors.clear();
-    attrib.texcoords.clear();
+    if( !keepUVCoords )
+        attrib.texcoords.clear();
+
     attrib.skin_weights.clear();
     attrib.texcoord_ws.clear();
     attrib.vertex_weights.clear();
  
     // Loop over vertices
-    for (size_t v = 0; v < attrib.vertices.size(); v++)
-        mesh.vertices.push_back(attrib.vertices[v]);
+    mesh.vertices.insert(mesh.vertices.end(), attrib.vertices.begin(), attrib.vertices.end());
 
+    if (keepUVCoords)
+        mesh.uvs.insert(mesh.uvs.end(), attrib.texcoords.begin(), attrib.texcoords.end());
+    
     // Loop over shapes
     for (size_t s = 0; s < shapes.size(); s++) {
                 
@@ -97,9 +111,15 @@ bool ParseOBJFile( const char* inputFile, Mesh& mesh, bool discardMaterials )
 
             // Loop over vertices in the face.
             for (size_t v = 0; v < fv; v++) {
-                tinyobj::index_t idx = shapes[s].mesh.indices[index_offset + v];
-                mesh.indices.push_back(idx.vertex_index);
+                const tinyobj::index_t& idx = shapes[s].mesh.indices[index_offset + v];
+                mesh.indices.push_back(idx.vertex_index);              
             }
+            if( keepUVCoords ) {
+                for (size_t v = 0; v < fv; v++) {
+                    const tinyobj::index_t& idx = shapes[s].mesh.indices[index_offset + v];
+                    mesh.uv_indices.push_back(idx.texcoord_index);
+                }
+            }               
             index_offset += fv;
 
             // per-face material
@@ -161,8 +181,90 @@ bool ParsePlyFile(const char* inputFile, Mesh& mesh)
     return true;
 }
 
+std::vector<DGFBaker::TriangleAttributes> BuildTriangleAttributes(const Mesh& mesh, const CommandLine& cmd)
+{
+    size_t numTris = mesh.indices.size() / 3;
 
-DGFBaker::BakerMesh CreateDGFBakerMesh( const Mesh& mesh )
+    std::vector<DGFBaker::TriangleAttributes> attribs(numTris);
+
+    if (!mesh.materialIDs.empty())
+    {
+        for (size_t i = 0; i < numTris; i++)
+            attribs[i].geomID = mesh.materialIDs[i];        
+    }
+
+    if (cmd.generateOMMIDs)
+    {
+        printf("Generating OMM IDs from triangle UVs...\n");
+        struct TriangleUV
+        {
+            float UV[6] = { 0 };
+            size_t triIndex;
+
+            bool operator<(const TriangleUV& tuv) const
+            {
+                for (size_t i = 0; i < 6; i++) {
+                    if (UV[i] > tuv.UV[i])
+                        return false;
+                    if (UV[i] < tuv.UV[i])
+                        return true;                    
+                }
+                return false; // equal
+            }
+        };
+        std::vector<TriangleUV> tuv(numTris);
+        for (size_t i = 0; i < numTris; i++)
+        {
+            tuv[i].triIndex = i;
+            for (size_t k = 0; k < 3; k++)
+            {
+                int idx = mesh.uv_indices[3 * i + k];
+                if (idx != -1)
+                {
+                    tuv[i].UV[2 * k] = mesh.uvs[2 * idx];
+                    tuv[i].UV[2 * k + 1] = mesh.uvs[2 * idx + 1];
+                }
+            }
+        }
+
+        // sort triangles by UV coordinates
+        std::sort(tuv.begin(), tuv.end());
+
+        // assign the same OMM index to each unique UV coordinate set
+        int ommIndex = 0;
+        for (size_t i = 0; i < numTris; )
+        {
+            size_t i0 = i;
+            do
+            {
+                size_t idx = tuv[i].triIndex;
+                attribs[idx].hasOMM = true;
+                attribs[idx].ommIndex = ommIndex;
+                i++;
+            } while (i < numTris && !(tuv[i0] < tuv[i]));
+
+            ommIndex++;
+        }
+
+        printf("%d unique OMMs created\n", ommIndex);
+    }
+
+    if (cmd.randomOMMIDs)
+    {
+        printf("Generating randomized OMM IDs...\n");
+        srand(42);
+        for (size_t i = 0; i < numTris; i++)
+        {
+            attribs[i].hasOMM = true;
+            attribs[i].ommIndex = rand() % cmd.numRandomOMMs;
+        }
+    }
+
+    return attribs;
+}
+
+
+DGFBaker::BakerMesh CreateDGFBakerMesh( const Mesh& mesh, const CommandLine& cmd )
 {
     // Provide a function for the baker to retrieve mesh vertices
     auto _VertexReader =
@@ -188,195 +290,19 @@ DGFBaker::BakerMesh CreateDGFBakerMesh( const Mesh& mesh )
             }
         };
 
+    auto attribs = BuildTriangleAttributes(mesh, cmd);
+
     // Provide a function for the baker to retrieve triangle attributes
     auto _AttributeReader = 
-        [&mesh](DGFBaker::TriangleAttributes* out, const uint32_t* triIndices, size_t numTris)
+        [attribs](DGFBaker::TriangleAttributes* out, const uint32_t* triIndices, size_t numTris)
         {
-            if (mesh.materialIDs.empty())
-            {
-                DGFBaker::TriangleAttributes defaultAttribs;
-                for (size_t i = 0; i < numTris; i++)
-                    out[i] = defaultAttribs;
-            }
-            else
-            {
-                for (size_t i = 0; i < numTris; i++)
-                {
-                    DGFBaker::TriangleAttributes attribs;
-                    attribs.geomID = mesh.materialIDs[triIndices[i]];
-                    attribs.opaque = true;
-                    attribs.hasOMM = false;
-                    attribs.ommIndex = 0;
-                    out[i] = attribs;
-                }
-            }
+            for (size_t i = 0; i < numTris; i++)
+                out[i] = attribs[triIndices[i]];
         };
 
     size_t numVerts = mesh.vertices.size() / 3;
     size_t numTris = mesh.indices.size() / 3;
     return DGFBaker::BakerMesh(_VertexReader, _IndexReader, _AttributeReader, numVerts, numTris);
-}
-
-struct CommandLine
-{
-    const char* inFile;
-    const char* objDumpFile = nullptr;
-    const char* binDumpFile = nullptr;
-    const char* statsFile = nullptr;
-    DGFBaker::Config bakerConfig;
-    bool validate = true;
-    bool discardMaterials = false;
-    bool measureError = false;
-    bool testPreclusterPath = false;
-};
-
-bool ParseCommandLine( CommandLine& cmd, int argc, char** argv)
-{
-    if (argc < 2)
-    {
-        printf("USAGE: %s <infile> [OPTIONS]\n", argv[0]);
-        printf("    <infile> is a wavefront obj or ply file\n");
-        printf("    OPTIONS are:\n");
-        printf("         --cluster-max-faces <uint> \n");
-        printf("         --cluster-max-vertices <uint> \n");
-        printf("         --target-bits <uint> \n");
-        printf("         --exponent <int> \n");
-        printf("         --print-perf \n");
-        printf("         --skip-validation \n");
-        printf("         --dump-obj <path>\n");
-        printf("         --dump-bin <path>\n");
-        printf("         --write-stats <path>\n");
-        printf("         --discard-materials\n");
-        printf("         --measure-error\n");
-        printf("         --forced-offset-width <uint> <uint> <uint>\n");
-        printf("         --user-data\n");
-        printf("         --packer {HPG24|SAH}\n");
-        printf("         --weld-vertices\n");
-        printf("         --test-preclustering\n");
-        printf("         --quantize-for-animation\n");
-        printf("         --deformation-padding <float>\n");
-        return false;
-    }
-
-    cmd.inFile = argv[1];
-    
-    DGFBaker::Config& bakerConfig = cmd.bakerConfig;
-    bakerConfig.clusterMaxFaces = 128;
-    bakerConfig.clusterMaxVerts = 256;
-    bakerConfig.targetBitWidth = 16;
-    bakerConfig.outputStream = &std::cout;
-    bakerConfig.generateVertexTable = true;
-    bakerConfig.generateClusterTable = true;
-    bakerConfig.packer = DGFBaker::PackerMode::DEFAULT;
-    bakerConfig.encoderRoundTripValidation = true;
-    bakerConfig.generateTriangleRemap = true;
-    bakerConfig.weldVertices = false;
-
-    for (int i = 2; i < argc; )
-    {
-        const char* optionName = argv[i++];        
-        if (strcmp(optionName, "--cluster-max-faces") == 0)
-        {
-            if (i != argc)
-                bakerConfig.clusterMaxFaces = atoi(argv[i++]);            
-        }
-        else if (strcmp(optionName, "--cluster-max-vertices") == 0)
-        {
-            if (i != argc)
-                bakerConfig.clusterMaxVerts = atoi(argv[i++]);
-        }
-        else if (strcmp(optionName, "--target-bits") == 0)
-        {
-            if (i != argc)
-                bakerConfig.targetBitWidth = atoi(argv[i++]);
-            bakerConfig.quantizationMode = DGFBaker::QuantizationMode::TARGET_BIT_WIDTH;
-        }   
-        else if (strcmp(optionName, "--exponent") == 0)
-        {
-            if (i != argc)
-                bakerConfig.quantizationExponent = atoi(argv[i++]);
-            bakerConfig.quantizationMode = DGFBaker::QuantizationMode::EXPLICIT_EXPONENT;
-        }
-        else if (strcmp(optionName, "--print-perf") == 0)
-        {
-            bakerConfig.printPerfData = true;
-        }
-        else if (strcmp(optionName, "--skip-validation") == 0)
-        {
-            cmd.validate = false;
-            cmd.bakerConfig.encoderRoundTripValidation = false;;
-        }
-        else if (strcmp(optionName, "--discard-materials") == 0)
-        {
-            cmd.discardMaterials = true;
-        }
-        else if (strcmp(optionName, "--dump-obj") == 0)
-        {
-            if (i != argc)
-                cmd.objDumpFile = argv[i++];          
-        }
-        else if (strcmp(optionName, "--dump-bin") == 0)
-        {
-            if (i != argc)
-                cmd.binDumpFile = argv[i++];
-        }
-        else if (strcmp(optionName, "--write-stats") == 0)
-        {
-            if (i != argc)
-                cmd.statsFile = argv[i++];
-        }
-        else if (strcmp(optionName, "--measure-error") == 0)
-        {
-            cmd.measureError = true;
-        }
-        else if (strcmp(optionName, "--forced-offset-width") == 0)
-        {
-            if (i+3 <= argc)
-            {
-                cmd.bakerConfig.blockForcedOffsetWidth[0] = atoi(argv[i++]);
-                cmd.bakerConfig.blockForcedOffsetWidth[1] = atoi(argv[i++]);
-                cmd.bakerConfig.blockForcedOffsetWidth[2] = atoi(argv[i++]);
-            }
-        }
-        else if (strcmp(optionName, "--user-data") == 0)
-        {
-            cmd.bakerConfig.enableUserData = true;
-        }
-        else if (strcmp(optionName, "--packer") == 0)
-        {
-            if (i != argc)
-            {
-                const char* packerName = argv[i++];
-                cmd.bakerConfig.packer = DGFBaker::PackerModeFromString(packerName);
-            }
-        }
-        else if (strcmp(optionName, "--weld-vertices") == 0)
-        {
-            cmd.bakerConfig.weldVertices = true;
-        }
-        else if (strcmp(optionName, "--test-preclustering") == 0)
-        {
-            cmd.testPreclusterPath = true;
-        }
-        else if (strcmp(optionName, "--quantize-for-animation") == 0)
-        {
-            cmd.bakerConfig.quantizeForAnimation = true;
-        }
-        else if (strcmp(optionName, "--deformation-padding") == 0)
-        {
-            if (i != argc)
-            {
-                float padding = (float) std::atof(argv[i++]);
-                cmd.bakerConfig.clusterDeformationPadding = padding;
-            }
-        }
-        else
-        {
-            printf("Spurious commandline argument: %s\n", optionName);
-        }
-    }
-
-    return true;
 }
 
 bool DumpOBJ( const char* fileName, const DGFBaker::DecodedMesh& mesh )
@@ -564,7 +490,7 @@ static void TestPreclusterPath( const DGFBaker::Config& config, DGFBaker::Baker&
     printf("Conversion took: %.2fms  Produced %zu blocks\n", executionTime * 1000, numBlocks );
 
     printf("Validating...\n");
-    DGFBaker::Validator val(std::cout, config.weldVertices);
+    DGFBaker::Validator val(config);
     if (!val.ValidateDGFPreclustered(clusteredMesh, output))
     {
         exit(1);
@@ -603,6 +529,7 @@ void PrintClusterSizeStatistics( const DGFBaker::BakerOutput& output )
     printf("Tris per cluster:    Min: %zu  Max: %3zu Mean: %.2f\n", minTris, maxTris, (double)totalTris / (double)numClusters);
 }
 
+int TestDGFS(const CommandLine& cmdLine, const DGFBaker::BakerMesh& mesh);
 
 int main(int argc, char* argv[])
 {    
@@ -636,7 +563,7 @@ int main(int argc, char* argv[])
     if (_stricmp(Extension, ".obj") == 0)
     {
         printf("Loading obj file: %s\n", inFile);
-        if (!ParseOBJFile(inFile, mesh, cmdLine.discardMaterials ))
+        if (!ParseOBJFile(inFile, mesh, cmdLine ))
         {
             return 1;
         }
@@ -662,11 +589,24 @@ int main(int argc, char* argv[])
     size_t numMaterials = mesh.numMaterials;
     printf("Model size: %zu verts %zu tris  %zu materials\n", numVerts, numTriangles, numMaterials);
     printf("Input size: %.2fMB\n", inputByteSize / (1024.0 * 1024.0));
-    DGFBaker::BakerMesh bakerMesh = CreateDGFBakerMesh(mesh);
+    DGFBaker::BakerMesh bakerMesh = CreateDGFBakerMesh(mesh,cmdLine);
     
+    if (cmdLine.testDGFS)
+    {
+        printf("**** Testing DGFS\n");
+        int result = TestDGFS(cmdLine,bakerMesh);
+        if (result != 0)
+        {
+            printf("FAILED!!\n");
+        }
+        return result;
+    }
+
     // bake it
     printf("Baking DGF blocks...\n");
+
     DGFBaker::Baker baker(bakerConfig);
+
     
     auto startTime = std::chrono::high_resolution_clock::now();
     DGFBaker::BakerOutput dgfOutput = baker.BakeDGF(bakerMesh);
@@ -699,7 +639,7 @@ int main(int argc, char* argv[])
     if (cmdLine.validate)
     {
         printf("Validating DGF blocks...\n");
-        DGFBaker::Validator val(std::cout,cmdLine.bakerConfig.weldVertices);
+        DGFBaker::Validator val(bakerConfig);
         if (!val.ValidateDGF(bakerMesh, dgfOutput))
         {
             return 1;

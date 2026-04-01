@@ -34,7 +34,16 @@ namespace DGFBaker
         std::vector<Cluster>& clusters,
         size_t maxVerts,
         size_t maxFaces,
-        bool weldVertices );
+        bool weldVertices, 
+        size_t sahBlockSize);
+
+    void BuildClustersBinSAH_Parallel(
+        const DGFBaker::BakerMesh& mesh,
+        std::vector<Cluster>& clusters,
+        size_t maxVerts,
+        size_t maxFaces,
+        bool weldVertices,
+        size_t sahBlockSize);
 
     bool ValidateClusters(const std::vector<Cluster>& clusters, const DGFBaker::BakerMesh& mesh, size_t maxVerts, size_t maxFaces );
 }

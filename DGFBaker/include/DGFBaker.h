@@ -27,6 +27,7 @@
 #include <vector>
 #include <functional>
 #include <ostream>
+#include <iostream>
 #include <cstring>
 #include <limits>
 
@@ -301,8 +302,19 @@ namespace DGFBaker
 
         bool enableExponentAdjust  = true;           // Allow block exponents to vary to improve compression for pre-quantized input
 
-        bool weldVertices = false; // Allow the encoder to combine different vertices with identical positions 
-                                   //    When this option is enabled, the block-level connectivity cannot be used as an implicit index buffer
+        bool weldVertices = false; // Allow the encoder to combine different input vertices with identical positions 
+                                   
+
+        bool allowInternalThreading = false;
+
+        // If enabled, vertices with different input positions which quantize to the same 
+        //   output position will be combined, and any resulting degenerate triangles removed
+        // 
+        //  Vertices with the same input position will not be combined, since it is assumed that they indicate a vertex attribute boundary
+        //   
+        bool postQuantizationWelding = false;
+
+        size_t sahBlockSize = 1;
     };
     
     class BakerOutput
@@ -316,12 +328,14 @@ namespace DGFBaker
             std::vector<TriangleRemapInfo> remapIn,
             std::vector<int32_t> ommIndicesIn,
             std::vector<uint32_t> vertexTable,
-            std::vector<uint32_t> clusterTable )
+            std::vector<uint32_t> clusterTable, 
+            int8_t quantFactor )
             : dgfBlocks(std::move(dgfBlocksIn)),
               triangleRemap(std::move(remapIn)),
               blockOMMIndices(std::move(ommIndicesIn)),
               vertexTable(std::move(vertexTable)),
-              clusterTable(std::move(clusterTable))
+              clusterTable(std::move(clusterTable)),
+              quantizationFactor(quantFactor)
         {
         }
 
@@ -339,11 +353,16 @@ namespace DGFBaker
         // Table mapping DGF block vertices to input vertices.  
         //    Each block has one entry per vertex which indexes into the original input vertex buffer
         //    Size of the table is the sum of vertex counts across all output blocks
+        // 
+        //  If vertex welding is enabled, the block vertices may be mapped to a different vertex with the same position
         std::vector<uint32_t> vertexTable;
 
         // Table giving the index of the first DGF block for each cluster
         //    Size of table is the number of clusters
         std::vector<uint32_t> clusterTable;
+
+        // Signed vertex quantization factor which was selected
+        int8_t quantizationFactor = 0;
     };
 
 
@@ -446,7 +465,15 @@ namespace DGFBaker
             std::vector<uint8_t> vertexTable;
         };
 
+        BakerOutputPreclustered() = default;
+        BakerOutputPreclustered(std::vector<OutputCluster> outputClusters, int8_t quantFactor)
+            : clusters(std::move(outputClusters)),
+            quantizationFactor(quantFactor)
+        {
+        }
+
         std::vector<OutputCluster> clusters;
+        int8_t quantizationFactor;
     };
    
 
@@ -524,7 +551,8 @@ namespace DGFBaker
     class Baker
     {
     public:
-        
+        Baker() : m_config() {};
+
         Baker(const Config& config);
 
         std::vector<BakerMeshCluster> BuildClusters( const BakerMesh& mesh );
@@ -555,7 +583,7 @@ namespace DGFBaker
               m_ib(std::move(ib)), 
               m_attribs(std::move(attribs)), 
               m_quantFactor(std::move(quant)),
-              m_triIndex( std::move(triIndex) )
+              m_triIndex( std::move(triIndex) )              
         {
         };
 
@@ -584,18 +612,32 @@ namespace DGFBaker
     {
     public:
         Validator(std::ostream& errorStream, bool vertexWelding=false)
-            : m_errorStream(errorStream), m_vertexWelding(vertexWelding)
+            : m_errorStream(errorStream), m_vertexWelding(vertexWelding), m_postQuantWelding(false)
+        {
+        };
+
+        Validator(const DGFBaker::Config& config)
+            : m_errorStream(config.outputStream != nullptr ? *config.outputStream : std::cerr), 
+              m_vertexWelding(config.weldVertices),
+              m_postQuantWelding(config.postQuantizationWelding)
         {
         };
 
         bool ValidateDGF( const BakerMesh& input, const BakerOutput& output );
         bool ValidateDGFPreclustered(const ClusteredMesh& input, const BakerOutputPreclustered& output);
-        bool ValidateDecodedMesh( const BakerMesh& input, const DecodedMesh& result, const std::vector<TriangleRemapInfo>& remap );
+        bool ValidateDecodedMesh( const BakerMesh& input, const DecodedMesh& result, const std::vector<TriangleRemapInfo>& remap, int8_t quantizationFactor );
 
     protected:
 
+        bool ValidateVertexTable(
+            const BakerMesh& input,
+            const std::vector<uint8_t>& dgfBlocks,
+            const std::vector<DGFBaker::TriangleRemapInfo>& triangleRemap,
+            const std::vector<uint32_t>& vertexTable );
+
         std::ostream& m_errorStream;
         bool m_vertexWelding;
+        bool m_postQuantWelding;
     };
 
 

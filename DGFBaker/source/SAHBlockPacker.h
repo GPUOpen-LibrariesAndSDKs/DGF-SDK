@@ -30,7 +30,7 @@
 namespace DGFBaker
 {
 
-    PackClusterResult PackClusterSAH(uint32_t primIDBase, const PackClusterInputs& cluster, PerformanceData& perfData, const DGFBaker::Config& config);
+    PackClusterResult PackClusterSAH(const PackClusterInputs& cluster, const DGFBaker::Config& config);
 
 
 }

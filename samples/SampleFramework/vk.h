@@ -58,6 +58,9 @@ namespace vk
         VmaAllocator GetAllocator() { return m_allocator; }
         VmaAllocation GetAllocation() { return m_allocation; }
 
+        void* Map(size_t readSize);
+        void Unmap(size_t writeSize);
+
     protected:
         friend class Device;
 
@@ -78,6 +81,8 @@ namespace vk
         DynamicBuffer(VkDevice device, VmaAllocator allocator, VMABuffer renameChain[api::FRAME_COUNT]);
 
         void Write(const void* contents, size_t size, size_t frameIndex);
+        void* Map(size_t frameIndex);
+        void Unmap(size_t frameIndex,size_t bytesWritten);
 
         VMABuffer m_renameChain[api::FRAME_COUNT];
     };
@@ -297,16 +302,41 @@ namespace vk
         uint32_t m_descriptor_count;
     };
 
-    class RTAS : public api::RTAS 
+    class RTASBuffer : public api::RTASBuffer
     {
     public:
-        virtual api::GPUVA GetGPUVirtualAddress() override
+        api::GPUVA GetGPUVirtualAddress() 
         {
             VkBufferDeviceAddressInfo info = { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
             info.buffer = m_buffer;
             return vkGetBufferDeviceAddress(m_device, &info);
         }
 
+        VkBuffer GetBuffer() { return m_buffer; }
+
+    private:
+        friend class Device;
+
+        RTASBuffer(VkBuffer buffer, VmaAllocator allocator, VmaAllocation allocation, VkDevice device)
+            : m_buffer(buffer), m_allocator(allocator), m_allocation(allocation), m_device(device)
+        {
+        }
+
+        ~RTASBuffer()
+        {
+            vmaDestroyBuffer(m_allocator, m_buffer, m_allocation);
+        }
+
+        VkBuffer m_buffer;
+        VkDevice m_device;
+        VmaAllocator m_allocator;
+        VmaAllocation m_allocation;
+    };
+
+    class RTAS : public api::RTAS 
+    {
+    public:
+        
         virtual api::GPUVA GetRTASReference() override
         {
             VkAccelerationStructureDeviceAddressInfoKHR info = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
@@ -322,20 +352,21 @@ namespace vk
     private:
         friend class Device;
 
-        RTAS(VkBuffer buffer, VmaAllocator allocator, VmaAllocation allocation, VkDevice device, VkAccelerationStructureKHR as) : m_buffer(buffer), m_allocator(allocator), m_allocation(allocation), m_device(device), m_as(as)
+        RTAS(RTASBuffer* buffer, VkDevice device, VkAccelerationStructureKHR as)
+            : m_buffer(buffer), m_device(device), m_as(as)
         {
+            m_buffer->AddRef();
         }
 
         ~RTAS()
         {
-            vmaDestroyBuffer(m_allocator, m_buffer, m_allocation);
+            vkDestroyAccelerationStructureKHR(m_device, m_as, nullptr);
+            m_buffer->Release();
         }
 
         VkAccelerationStructureKHR m_as;
-        VkBuffer m_buffer;
+        RTASBuffer* m_buffer;
         VkDevice m_device;
-        VmaAllocator m_allocator;
-        VmaAllocation m_allocation;
     };
     class Device : public api::Device
     {
@@ -376,7 +407,8 @@ namespace vk
 
         virtual vk::Texture* CreateUAVTexture(uint32_t width, uint32_t height) override;
 
-        virtual vk::RTAS* CreateRTAS(size_t size) override;
+        virtual vk::RTASBuffer* CreateRTASBuffer(size_t size) override;
+        virtual vk::RTAS* CreateRTAS(api::RTASBuffer* buffer, size_t offset, size_t size) override;
 
         virtual vk::Buffer* CreateUAVBuffer(size_t size) override;
 
@@ -390,9 +422,16 @@ namespace vk
         virtual vk::TimerHeap* CreateTimerHeap(size_t numTimers) override;
         
         virtual void WriteDynamicBuffer(api::Buffer* buffer, const void* contents, size_t size) override;
+        virtual void* MapDynamicBuffer(api::Buffer* buffer) override;
+        virtual void UnmapDynamicBuffer(api::Buffer* buffer, size_t bytesWritten) override;
 
         virtual std::wstring GetAPIName() override { return L"Vulkan"; }
 
+        virtual void ScheduleFrameSyncCallback(api::FrameSyncCallback cb) override;
+
+        virtual vk::Buffer* CreateUploadBuffer(size_t size) override;
+        virtual void* MapBuffer(api::Buffer* buffer, size_t readRangeSize) override;
+        virtual void UnmapBuffer(api::Buffer* buffer, size_t writeRangeSize) override;
 
     private:
         friend Device* CreateDevice(HWND hwnd, HINSTANCE hInstance, uint32_t width, uint32_t height);
@@ -410,6 +449,7 @@ namespace vk
             VkFence     renderCompleteFence;
             UINT64 fenceValue;
             VkDescriptorPool descriptorPool;
+            std::vector<api::FrameSyncCallback> syncCallbacks;
         };
 
         friend class CommandList;

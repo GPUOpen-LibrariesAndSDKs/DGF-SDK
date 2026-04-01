@@ -88,7 +88,9 @@ void SimpleCamera::Update(float elapsedSeconds)
     // Move the camera in model space.
     float x = move.x * -cosf(m_yaw) - move.z * sinf(m_yaw);
     float z = move.x * sinf(m_yaw) - move.z * cosf(m_yaw);
+    float y = -move.z * sinf(m_pitch);
     m_position.x += x * moveInterval;
+    m_position.y += y * moveInterval;
     m_position.z += z * moveInterval;
 
     // Determine the look direction.

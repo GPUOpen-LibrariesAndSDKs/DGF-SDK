@@ -1,5 +1,6 @@
 project(agilitySDK)
 include(update-agilitysdk.cmake)
+include(update-dxc.cmake)
 
 add_library(agilitySDK INTERFACE )
 
